@@ -1,5 +1,7 @@
 package io.unitycatalog.server.service.iceberg;
 
+import io.unitycatalog.server.exception.BaseException;
+import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.AwsCredentials;
 import io.unitycatalog.server.model.AzureUserDelegationSAS;
 import io.unitycatalog.server.model.GcpOauthToken;
@@ -43,6 +45,11 @@ public class TableConfigService {
       case ABFS, ABFSS -> getADLSConfig(location);
       case GS -> getGCSConfig(location);
       case S3 -> getS3Config(location);
+      // OSS is not wired into the Iceberg REST catalog (no iceberg-aliyun dependency); the Delta
+      // path uses the temporary-table-credentials API directly instead.
+      case OSS ->
+          throw new BaseException(
+              ErrorCode.UNIMPLEMENTED, "OSS is not supported by the Iceberg REST catalog.");
       case FILE, NULL -> Map.of();
     };
   }

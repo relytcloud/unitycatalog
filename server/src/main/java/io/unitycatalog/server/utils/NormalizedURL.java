@@ -138,7 +138,7 @@ public final class NormalizedURL {
       // It's a local path without file://. Construct a file:// URI using Path.
       case NULL -> localFileURIToString(Paths.get(inputPath).toAbsolutePath().toUri().normalize());
       case FILE -> localFileURIToString(uri);
-      case S3, GS, ABFS, ABFSS -> removeExtraSlashes(uri.toString());
+      case S3, GS, ABFS, ABFSS, OSS -> removeExtraSlashes(uri.toString());
     };
   }
 

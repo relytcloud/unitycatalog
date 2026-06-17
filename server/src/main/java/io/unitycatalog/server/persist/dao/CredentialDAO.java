@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
+import io.unitycatalog.server.model.AliyunRamRoleRequest;
+import io.unitycatalog.server.model.AliyunRamRoleResponse;
 import io.unitycatalog.server.model.AwsIamRoleRequest;
 import io.unitycatalog.server.model.AwsIamRoleResponse;
 import io.unitycatalog.server.model.CreateCredentialRequest;
@@ -50,6 +52,7 @@ public class CredentialDAO extends IdentifiableDAO {
 
   public enum CredentialType {
     AWS_IAM_ROLE,
+    ALIYUN_RAM_ROLE,
     // Add other types as necessary
   }
 
@@ -103,13 +106,16 @@ public class CredentialDAO extends IdentifiableDAO {
             .build();
     if (createRequest.getAwsIamRole() != null) {
       dao.setAwsIamRole(createRequest.getAwsIamRole());
+    } else if (createRequest.getAliyunRamRole() != null) {
+      dao.setAliyunRamRole(createRequest.getAliyunRamRole());
     } else {
       throw new IllegalArgumentException("Unknown credential type");
     }
     return dao;
   }
 
-  public CredentialInfo toCredentialInfo(Optional<String> masterAwsIamRoleArn) {
+  public CredentialInfo toCredentialInfo(
+      Optional<String> masterAwsIamRoleArn, Optional<String> masterAliyunRamRoleArn) {
     CredentialInfo credentialInfo =
         new CredentialInfo()
             .id(getId().toString())
@@ -126,6 +132,14 @@ public class CredentialDAO extends IdentifiableDAO {
         AwsIamRoleResponse awsIamRole = parseCredential(AwsIamRoleResponse.class);
         masterAwsIamRoleArn.ifPresent(awsIamRole::setUnityCatalogIamArn);
         credentialInfo.setAwsIamRole(awsIamRole);
+        break;
+      case ALIYUN_RAM_ROLE:
+        AliyunRamRoleResponse aliyunRamRole = parseCredential(AliyunRamRoleResponse.class);
+        masterAliyunRamRoleArn.ifPresent(aliyunRamRole::setUnityCatalogRamArn);
+        // Never expose the static access key secret in API responses; it is only used internally
+        // by the credential vendor.
+        aliyunRamRole.setAccessKeySecret(null);
+        credentialInfo.setAliyunRamRole(aliyunRamRole);
         break;
         // TODO: support Azure and GCP.
       default:
@@ -176,5 +190,39 @@ public class CredentialDAO extends IdentifiableDAO {
 
   public AwsIamRoleResponse getAwsIamRoleResponse() {
     return parseCredential(CredentialType.AWS_IAM_ROLE, AwsIamRoleResponse.class);
+  }
+
+  public void setAliyunRamRole(AliyunRamRoleRequest aliyunRamRole) {
+    setCredential(CredentialType.ALIYUN_RAM_ROLE, fromAliyunRamRoleRequest(aliyunRamRole));
+  }
+
+  private static AliyunRamRoleResponse fromAliyunRamRoleRequest(
+      AliyunRamRoleRequest aliyunRamRoleRequest) {
+    boolean hasStaticKeys =
+        isNotEmpty(aliyunRamRoleRequest.getAccessKeyId())
+            && isNotEmpty(aliyunRamRoleRequest.getAccessKeySecret());
+    boolean hasRoleArn = isNotEmpty(aliyunRamRoleRequest.getRoleArn());
+    if (!hasStaticKeys && !hasRoleArn) {
+      throw new BaseException(
+          ErrorCode.INVALID_ARGUMENT,
+          "Aliyun RAM credential must provide either a role_arn (STS scheme) or "
+              + "access_key_id/access_key_secret (static scheme).");
+    }
+    // Unlike AWS, Aliyun STS AssumeRole has no external id; trust is established through the RAM
+    // role's trust policy naming the UC master RAM identity as a trusted principal. The static
+    // The static AK/SK and the role_arn modes share this single credential type so a credential
+    // can be switched from one mode to the other without any client change.
+    return new AliyunRamRoleResponse()
+        .roleArn(aliyunRamRoleRequest.getRoleArn())
+        .accessKeyId(aliyunRamRoleRequest.getAccessKeyId())
+        .accessKeySecret(aliyunRamRoleRequest.getAccessKeySecret());
+  }
+
+  private static boolean isNotEmpty(String value) {
+    return value != null && !value.isEmpty();
+  }
+
+  public AliyunRamRoleResponse getAliyunRamRoleResponse() {
+    return parseCredential(CredentialType.ALIYUN_RAM_ROLE, AliyunRamRoleResponse.class);
   }
 }

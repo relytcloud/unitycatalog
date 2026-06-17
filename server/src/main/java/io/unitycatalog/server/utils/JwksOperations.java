@@ -3,8 +3,10 @@ package io.unitycatalog.server.utils;
 import static io.unitycatalog.server.security.SecurityContext.Issuers.INTERNAL;
 
 import com.auth0.jwk.Jwk;
+import com.auth0.jwk.JwkException;
 import com.auth0.jwk.JwkProvider;
 import com.auth0.jwk.JwkProviderBuilder;
+import com.auth0.jwk.SigningKeyNotFoundException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.algorithms.Algorithm;
@@ -17,6 +19,7 @@ import io.unitycatalog.server.exception.OAuthInvalidClientException;
 import io.unitycatalog.server.exception.OAuthInvalidRequestException;
 import io.unitycatalog.server.security.SecurityContext;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
@@ -31,11 +34,17 @@ public class JwksOperations {
   private final WebClient webClient = WebClient.builder().build();
   private static final ObjectMapper mapper = new ObjectMapper();
   private final SecurityContext securityContext;
+  private final ServerProperties serverProperties;
 
   private static final Logger LOGGER = LoggerFactory.getLogger(JwksOperations.class);
 
   public JwksOperations(SecurityContext securityContext) {
+    this(securityContext, null);
+  }
+
+  public JwksOperations(SecurityContext securityContext, ServerProperties serverProperties) {
     this.securityContext = securityContext;
+    this.serverProperties = serverProperties;
   }
 
   @SneakyThrows
@@ -86,6 +95,25 @@ public class JwksOperations {
       Path certsFile = securityContext.getCertsFile();
       return new JwkProviderBuilder(certsFile.toUri().toURL()).cached(false).build();
     } else {
+      // Trusted external issuers (e.g. Relyt instances doing token-exchange) are bare
+      // identifiers, not OIDC providers: their public keys are registered locally in a static
+      // JWKS file instead of being discovered over the network. Because a single file can hold
+      // keys for multiple issuers, each JWK must carry an "issuer" member and a key is only
+      // accepted for the issuer it was registered to (see IssuerScopedJwkProvider) — otherwise
+      // one registered instance could sign tokens accepted as another allowlisted issuer.
+      String externalJwksFile =
+          serverProperties != null ? serverProperties.getExternalJwksFile() : null;
+      if (externalJwksFile != null && !externalJwksFile.isBlank()) {
+        Path jwksPath = Path.of(externalJwksFile);
+        if (Files.exists(jwksPath)) {
+          LOGGER.debug("Using static external JWKS file '{}' for issuer '{}'", jwksPath, issuer);
+          JwkProvider fileProvider =
+              new JwkProviderBuilder(jwksPath.toUri().toURL()).cached(false).build();
+          return new IssuerScopedJwkProvider(fileProvider, issuer);
+        }
+        LOGGER.warn("Configured external JWKS file '{}' does not exist", jwksPath);
+      }
+
       // Get the JWKS from the OIDC well-known location described here
       // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
 
@@ -130,6 +158,36 @@ public class JwksOperations {
 
       // TODO: Or maybe just cache the provider for reuse.
       return new JwkProviderBuilder(URI.create(configJwksUri).toURL()).cached(false).build();
+    }
+  }
+
+  /**
+   * Wraps a JWKS provider to bind each key to the issuer it was registered for. Every JWK in the
+   * static external JWKS file must carry an {@code "issuer"} member; a key is returned only when
+   * that member equals the token's claimed issuer. This prevents a confused-issuer attack where a
+   * file shared across instances would otherwise let one instance's key (selected only by {@code
+   * kid}) sign a token accepted as a different allowlisted issuer.
+   */
+  private static final class IssuerScopedJwkProvider implements JwkProvider {
+    private final JwkProvider delegate;
+    private final String expectedIssuer;
+
+    IssuerScopedJwkProvider(JwkProvider delegate, String expectedIssuer) {
+      this.delegate = delegate;
+      this.expectedIssuer = expectedIssuer;
+    }
+
+    @Override
+    public Jwk get(String keyId) throws JwkException {
+      Jwk jwk = delegate.get(keyId);
+      Object keyIssuer = jwk.getAdditionalAttributes().get("issuer");
+      if (keyIssuer == null || !expectedIssuer.equals(keyIssuer.toString())) {
+        throw new SigningKeyNotFoundException(
+            String.format(
+                "JWKS key '%s' is not registered for issuer '%s'", keyId, expectedIssuer),
+            null);
+      }
+      return jwk;
     }
   }
 }

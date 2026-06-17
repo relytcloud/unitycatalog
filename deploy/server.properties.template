@@ -1,0 +1,41 @@
+# Rendered by deploy-uc.sh from demo/deploy/uc.env — DO NOT edit the rendered output by hand.
+# Placeholders of the form dollar-brace VAR are substituted with values from uc.env.
+server.env=dev
+
+## Authorization (enable for per-user token-exchange; disable to turn auth off)
+server.authorization=${UC_AUTHORIZATION}
+server.authorization-url=
+server.token-url=
+server.client-id=
+server.client-secret=
+server.redirect-port=
+
+# Trusted external issuers (= Relyt instance ids, comma-separated). Changing requires a restart.
+server.allowed-issuers=${UC_ALLOWED_ISSUERS}
+# Expected JWT audiences (must match the subject_token aud).
+server.audiences=${UC_AUDIENCES}
+
+server.cookie-timeout=P5D
+server.managed-table.enabled=false
+
+#### AWS (unused in this deployment; left to DefaultCredentialsProvider)
+aws.masterRoleArn=
+aws.accessKey=
+aws.secretKey=
+aws.region=
+
+#####################################################################
+# Relyt fork additions (not in upstream UC v0.4.1)
+#####################################################################
+
+# Static JWKS of the issuers above. Each key carries an "issuer" member and is only accepted for
+# that issuer (kid + issuer binding). Hot-reloaded; no restart needed for key add/rotate.
+server.external-jwks-file=${UC_EXTERNAL_JWKS_FILE}
+# Access-token lifetime for token-exchange (ISO-8601). Opt-in: leave blank for no expiry.
+server.access-token-ttl=${UC_ACCESS_TOKEN_TTL}
+
+# Aliyun OSS — master RAM identity used by the STS AssumeRole mode.
+aliyun.region=${ALIYUN_REGION}
+aliyun.accessKey=${ALIYUN_ACCESS_KEY}
+aliyun.secretKey=${ALIYUN_SECRET_KEY}
+aliyun.masterRoleArn=${ALIYUN_MASTER_ROLE_ARN}

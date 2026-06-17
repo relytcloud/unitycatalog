@@ -2,6 +2,7 @@ package io.unitycatalog.server.utils;
 
 import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
+import io.unitycatalog.server.service.credential.aliyun.OssStorageConfig;
 import io.unitycatalog.server.service.credential.aws.S3StorageConfig;
 import io.unitycatalog.server.service.credential.azure.ADLSStorageConfig;
 import io.unitycatalog.server.service.credential.gcp.GcsStorageConfig;
@@ -204,7 +205,13 @@ public class ServerProperties {
     AWS_ACCESS_KEY("aws.accessKey"),
     AWS_SECRET_KEY("aws.secretKey"),
     AWS_SESSION_TOKEN("aws.sessionToken"),
-    AWS_REGION("aws.region");
+    AWS_REGION("aws.region"),
+    // Aliyun master RAM identity used by the STS mode to assume customer RAM roles defined in
+    // credential securables. Empty when only the static AK/SK mode is used.
+    ALIYUN_MASTER_ROLE_ARN("aliyun.masterRoleArn"),
+    ALIYUN_ACCESS_KEY("aliyun.accessKey"),
+    ALIYUN_SECRET_KEY("aliyun.secretKey"),
+    ALIYUN_REGION("aliyun.region");
     // The is not an exhaustive list. Some property keys like s3.bucketPath.0 with a numbering
     // suffix is not included. They are only accessed internally from functions like
     // getS3Configurations.
@@ -332,6 +339,50 @@ public class ServerProperties {
     }
 
     return s3BucketConfigMap;
+  }
+
+  /**
+   * Master RAM configuration used to construct the Aliyun STS client that assumes customer RAM
+   * roles defined in credential securables. The ramRoleArn is intentionally left unset here; the
+   * role to assume comes from the credential securable. Values may be null when only the static
+   * AK/SK mode is used.
+   */
+  public OssStorageConfig getOssMasterRoleConfiguration() {
+    return OssStorageConfig.builder()
+        .region(get(Property.ALIYUN_REGION))
+        .accessKey(get(Property.ALIYUN_ACCESS_KEY))
+        .secretKey(get(Property.ALIYUN_SECRET_KEY))
+        .build();
+  }
+
+  /**
+   * Per-bucket OSS configurations from server.properties (oss.bucketPath.*, oss.accessKey.*, ...).
+   * A config that carries an oss.ramRoleArn.* uses the STS mode; otherwise it uses the static AK/SK
+   * mode. Both produce the same credential shape so consumers stay agnostic.
+   */
+  public Map<NormalizedURL, OssStorageConfig> getOssConfigurations() {
+    Map<NormalizedURL, OssStorageConfig> ossBucketConfigMap = new HashMap<>();
+    int i = 0;
+    while (true) {
+      String bucketPath = getProperty("oss.bucketPath." + i);
+      if (bucketPath == null) {
+        break;
+      }
+      ossBucketConfigMap.put(
+          NormalizedURL.from(bucketPath),
+          OssStorageConfig.builder()
+              .bucketPath(bucketPath)
+              .region(getProperty("oss.region." + i))
+              .ramRoleArn(getProperty("oss.ramRoleArn." + i))
+              .accessKey(getProperty("oss.accessKey." + i))
+              .secretKey(getProperty("oss.secretKey." + i))
+              .securityToken(getProperty("oss.securityToken." + i))
+              .credentialGenerator(getProperty("oss.credentialGenerator." + i))
+              .build());
+      i++;
+    }
+
+    return ossBucketConfigMap;
   }
 
   public Map<NormalizedURL, GcsStorageConfig> getGcsConfigurations() {
@@ -470,6 +521,31 @@ public class ServerProperties {
    */
   public List<String> getAudiences() {
     return getCommaSeparatedList("server.audiences");
+  }
+
+  /**
+   * Path of a local JWKS file holding the public keys of trusted external issuers (e.g. Relyt
+   * instances doing token-exchange). Lets issuers that are bare identifiers rather than OIDC
+   * providers be verified without hosting a discovery endpoint; keys are selected by kid.
+   *
+   * @return the JWKS file path, or null when not configured
+   */
+  public String getExternalJwksFile() {
+    return getProperty("server.external-jwks-file");
+  }
+
+  /**
+   * Lifetime of access tokens issued by the token-exchange endpoint (ISO-8601 duration). Opt-in:
+   * when {@code server.access-token-ttl} is unset the exchanged token has no expiry (the original
+   * behavior), so existing deployments are unaffected unless they configure a TTL. When set, it
+   * bounds how long a leaked token stays usable; tokens are renewable by re-exchanging, so keep it
+   * short.
+   *
+   * @return the configured access token TTL, or {@code null} for no expiry when unset
+   */
+  public java.time.Duration getAccessTokenTtl() {
+    String value = getProperty("server.access-token-ttl");
+    return (value == null || value.isBlank()) ? null : java.time.Duration.parse(value);
   }
 
   /**

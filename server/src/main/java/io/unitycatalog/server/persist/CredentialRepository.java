@@ -53,7 +53,7 @@ public class CredentialRepository {
           }
           session.persist(dao);
           LOGGER.info("Added storage credential: {}", dao.getName());
-          return dao.toCredentialInfo(getAwsS3MasterRoleArn());
+          return dao.toCredentialInfo(getAwsS3MasterRoleArn(), getAliyunMasterRoleArn());
         },
         "Failed to add storage credential",
         /* readOnly = */ false);
@@ -68,7 +68,7 @@ public class CredentialRepository {
             throw new BaseException(ErrorCode.NOT_FOUND, "Storage credential not found: " + name);
           }
           LOGGER.info("Retrieved storage credential: {}", name);
-          return dao.toCredentialInfo(getAwsS3MasterRoleArn());
+          return dao.toCredentialInfo(getAwsS3MasterRoleArn(), getAliyunMasterRoleArn());
         },
         "Failed to get storage credential",
         /* readOnly = */ true);
@@ -102,7 +102,7 @@ public class CredentialRepository {
           List<CredentialInfo> results = new ArrayList<>();
           for (CredentialDAO dao : daoList) {
             try {
-              results.add(dao.toCredentialInfo(getAwsS3MasterRoleArn()));
+              results.add(dao.toCredentialInfo(getAwsS3MasterRoleArn(), getAliyunMasterRoleArn()));
             } catch (Exception e) {
               // Skip credentials that can't be processed
               LOGGER.error("Failed to process credential: {}", dao.getName(), e);
@@ -138,6 +138,9 @@ public class CredentialRepository {
           if (updateCredential.getAwsIamRole() != null) {
             existingCredential.setAwsIamRole(updateCredential.getAwsIamRole());
           }
+          if (updateCredential.getAliyunRamRole() != null) {
+            existingCredential.setAliyunRamRole(updateCredential.getAliyunRamRole());
+          }
           if (updateCredential.getComment() != null) {
             existingCredential.setComment(updateCredential.getComment());
           }
@@ -146,7 +149,8 @@ public class CredentialRepository {
 
           session.merge(existingCredential);
           LOGGER.info("Updated storage credential: {}", name);
-          return existingCredential.toCredentialInfo(getAwsS3MasterRoleArn());
+          return existingCredential.toCredentialInfo(
+              getAwsS3MasterRoleArn(), getAliyunMasterRoleArn());
         },
         "Failed to update storage credential",
         /* readOnly = */ false);
@@ -193,5 +197,10 @@ public class CredentialRepository {
 
   private Optional<String> getAwsS3MasterRoleArn() {
     return Optional.ofNullable(serverProperties.get(ServerProperties.Property.AWS_MASTER_ROLE_ARN));
+  }
+
+  private Optional<String> getAliyunMasterRoleArn() {
+    return Optional.ofNullable(
+        serverProperties.get(ServerProperties.Property.ALIYUN_MASTER_ROLE_ARN));
   }
 }

@@ -70,21 +70,31 @@ public class SecurityContext {
   }
 
   public String createAccessToken(DecodedJWT decodedJWT) {
+    return createAccessToken(decodedJWT, null);
+  }
+
+  public String createAccessToken(DecodedJWT decodedJWT, java.time.Duration ttl) {
     String subject =
         decodedJWT
             .getClaims()
             .getOrDefault(JwtClaim.EMAIL.key(), decodedJWT.getClaim(JwtClaim.SUBJECT.key()))
             .asString();
 
-    return JWT.create()
-        .withSubject(serviceName)
-        .withIssuer(localIssuer)
-        .withIssuedAt(new Date())
-        .withKeyId(keyId)
-        .withJWTId(UUID.randomUUID().toString())
-        .withClaim(JwtClaim.TOKEN_TYPE.key(), JwtTokenType.ACCESS.name())
-        .withClaim(JwtClaim.SUBJECT.key(), subject)
-        .sign(algorithm);
+    Date now = new Date();
+    var builder =
+        JWT.create()
+            .withSubject(serviceName)
+            .withIssuer(localIssuer)
+            .withIssuedAt(now)
+            .withKeyId(keyId)
+            .withJWTId(UUID.randomUUID().toString())
+            .withClaim(JwtClaim.TOKEN_TYPE.key(), JwtTokenType.ACCESS.name())
+            .withClaim(JwtClaim.SUBJECT.key(), subject);
+    if (ttl != null) {
+      // Bound the exchanged token lifetime; callers re-exchange to renew.
+      builder.withExpiresAt(new Date(now.getTime() + ttl.toMillis()));
+    }
+    return builder.sign(algorithm);
   }
 
   public String createServiceToken() {

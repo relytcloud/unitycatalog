@@ -31,6 +31,7 @@ public class FileOperations {
       // when UC OSS begins using the hadoopfs libraries.
       case S3 -> {}
       case GS -> {}
+      case OSS -> {}
       case ABFS, ABFSS -> {}
     }
   }
@@ -62,6 +63,7 @@ public class FileOperations {
       // when UC OSS begins using the hadoopfs libraries.
       case S3 -> {}
       case GS -> {}
+      case OSS -> {}
       case ABFS, ABFSS -> {}
     }
   }

@@ -107,6 +107,11 @@ lazy val commonSettings = Seq(
     // I think we're good with the classpath exception in there.
     case DepModuleInfo("jakarta.transaction", "jakarta.transaction-api", _) => true
     case DepModuleInfo("javax.annotation", "javax.annotation-api", _) => true
+    // CDDL 1.1 + GPL v2 with Classpath Exception (same dual license as javax.annotation above);
+    // pulled in transitively by the Aliyun SDK for XML binding. The classpath exception makes
+    // them safe to use and distribute.
+    case DepModuleInfo("javax.xml.bind", "jaxb-api", _) => true
+    case DepModuleInfo("javax.activation", "javax.activation-api", _) => true
   },
   
   assembly / test := {}
@@ -356,6 +361,11 @@ lazy val server = (project in file("server"))
       "com.amazonaws" % "aws-java-sdk-s3" % "1.12.728",
       "software.amazon.awssdk" % "sso" % "2.27.12",
       "software.amazon.awssdk" % "ssooidc" % "2.27.12",
+
+      // For Aliyun OSS access (STS AssumeRole mode). The static AK/SK mode does
+      // not call STS but shares the same credential vending package.
+      "com.aliyun" % "aliyun-java-sdk-core" % "4.7.3",
+      "com.aliyun" % "aliyun-java-sdk-sts" % "3.1.2",
 
       "org.apache.httpcomponents" % "httpcore" % "4.4.16",
       "org.apache.httpcomponents" % "httpclient" % "4.5.14",
