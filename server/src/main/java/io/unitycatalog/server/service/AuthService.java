@@ -68,7 +68,7 @@ public class AuthService {
       ServerProperties serverProperties,
       Repositories repositories) {
     this.securityContext = securityContext;
-    this.jwksOperations = new JwksOperations(securityContext);
+    this.jwksOperations = new JwksOperations(securityContext, serverProperties);
     this.serverProperties = serverProperties;
     this.userRepository = repositories.getUserRepository();
   }
@@ -188,7 +188,8 @@ public class AuthService {
 
     LOGGER.debug("Validated. Creating access token.");
 
-    String accessToken = securityContext.createAccessToken(decodedJWT);
+    String accessToken =
+        securityContext.createAccessToken(decodedJWT, serverProperties.getAccessTokenTtl());
 
     OAuthTokenExchangeInfo tokenExchangeInfo =
         new OAuthTokenExchangeInfo()

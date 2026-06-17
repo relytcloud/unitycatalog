@@ -49,6 +49,11 @@ public class FileIOFactory {
       case ABFS, ABFSS -> getADLSFileIO(location);
       case GS -> getGCSFileIO(location);
       case S3 -> getS3FileIO(location);
+      // OSS is not wired into the Iceberg REST catalog FileIO (no iceberg-aliyun dependency). The
+      // customer's Delta path uses the temporary-table-credentials API directly instead.
+      case OSS -> throw new BaseException(
+          io.unitycatalog.server.exception.ErrorCode.UNIMPLEMENTED,
+          "OSS FileIO is not supported by the Iceberg REST catalog.");
       case FILE, NULL -> new SimpleLocalFileIO();
     };
   }

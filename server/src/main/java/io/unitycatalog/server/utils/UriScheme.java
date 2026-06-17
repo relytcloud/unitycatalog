@@ -11,7 +11,7 @@ import java.util.Map;
  *
  * <p>This enum provides a type-safe way to handle different cloud storage and file system URI
  * schemes, including Azure Blob Storage (abfs/abfss), Google Cloud Storage (gs), Amazon S3 (s3),
- * and local file systems (file).
+ * Aliyun Object Storage Service (oss), and local file systems (file).
  *
  * <p>Use {@link #fromURI(URI)} to convert a URI to its corresponding scheme enum value.
  */
@@ -20,6 +20,7 @@ public enum UriScheme {
   ABFSS("abfss"),
   GS("gs"),
   S3("s3"),
+  OSS("oss"),
   FILE("file"),
   NULL(null);
 

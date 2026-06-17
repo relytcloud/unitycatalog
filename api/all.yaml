@@ -2382,6 +2382,24 @@ components:
             credentials.
           type: string
       type: object
+    AliyunTempCredentials:
+      description: |
+        Aliyun STS temporary credentials used to access OSS. For the static AK/SK
+        mode the access_key_id/access_key_secret are long-lived and
+        security_token is empty; for the STS AssumeRole mode all three
+        are short-lived and scoped. The structure is identical so consumers do not
+        need to distinguish the two modes.
+      properties:
+        access_key_id:
+          description: The access key ID that identifies the temporary credentials.
+          type: string
+        access_key_secret:
+          description: The access key secret that can be used to sign Aliyun OSS API requests.
+          type: string
+        security_token:
+          description: The STS security token that users must pass to Aliyun OSS API to use the temporary credentials. Empty for the static AK/SK scheme.
+          type: string
+      type: object
     AzureUserDelegationSAS:
       properties:
         sas_token:
@@ -2636,6 +2654,8 @@ components:
           $ref: '#/components/schemas/AzureUserDelegationSAS'
         gcp_oauth_token:
           $ref: '#/components/schemas/GcpOauthToken'
+        aliyun_temp_credentials:
+          $ref: '#/components/schemas/AliyunTempCredentials'
         expiration_time:
           description: |
             Server time when the credential will expire, in epoch milliseconds.
@@ -2782,6 +2802,8 @@ components:
           type: string
         aws_iam_role:
           $ref: '#/components/schemas/AwsIamRoleResponse'
+        aliyun_ram_role:
+          $ref: '#/components/schemas/AliyunRamRoleResponse'
         comment:
           description: Comment associated with the credential.
           type: string
@@ -2823,6 +2845,8 @@ components:
           type: string
         aws_iam_role:
           $ref: '#/components/schemas/AwsIamRoleRequest'
+        aliyun_ram_role:
+          $ref: '#/components/schemas/AliyunRamRoleRequest'
         purpose:
           $ref: "#/components/schemas/CredentialPurpose"
     UpdateCredentialRequest:
@@ -2836,6 +2860,8 @@ components:
           type: string
         aws_iam_role:
           $ref: '#/components/schemas/AwsIamRoleRequest'
+        aliyun_ram_role:
+          $ref: '#/components/schemas/AliyunRamRoleRequest'
         new_name:
           description: New name for the credential.
           type: string
@@ -2861,6 +2887,47 @@ components:
           type: string
         external_id:
           description: The external ID used in role assumption to prevent confused deputy problem.
+          type: string
+    AliyunRamRoleArn:
+      description: |
+        The Aliyun Resource Name (ARN) of the RAM role used to vend temporary credentials,
+        e.g. acs:ram::123456789012:role/uc-oss-access. For the static AK/SK scheme this may
+        be left empty and the credential carries a static AK/SK instead.
+      type: string
+    AliyunRamRoleRequest:
+      description: |
+        Aliyun OSS storage credential. Exactly one of the two modes must be provided, and the
+        same credential can be switched from one to the other without any client change:
+        the static AK/SK mode sets access_key_id/access_key_secret to long-lived OSS
+        keys; the STS AssumeRole mode sets role_arn to a RAM role that Unity Catalog
+        assumes. role_arn is therefore not always required.
+      type: object
+      properties:
+        role_arn:
+          $ref: "#/components/schemas/AliyunRamRoleArn"
+        access_key_id:
+          description: Long-lived OSS access key ID for the static AK/SK mode. Leave empty for the STS mode.
+          type: string
+        access_key_secret:
+          description: Long-lived OSS access key secret for the static AK/SK mode. Leave empty for the STS mode. Never returned in responses.
+          type: string
+    AliyunRamRoleResponse:
+      type: object
+      properties:
+        role_arn:
+          $ref: "#/components/schemas/AliyunRamRoleArn"
+        access_key_id:
+          description: Long-lived OSS access key ID for the static AK/SK mode; empty for the STS mode.
+          type: string
+        access_key_secret:
+          description: Always redacted (empty) in API responses; the stored secret is only used internally to vend credentials.
+          type: string
+        unity_catalog_ram_arn:
+          description: |
+            The Aliyun Resource Name (ARN) of the RAM identity used by the Unity Catalog Server.
+            This is the identity that assumes the customer RAM role, and the customer must add it
+            as a trusted principal in their RAM role's trust policy. Unlike AWS, Aliyun STS
+            AssumeRole has no external id; trust is established solely through the trust policy.
           type: string
     ListCredentialsResponse:
       type: object
