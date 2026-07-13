@@ -62,5 +62,11 @@
   "resolutions": {
     "react-scripts/resolve-url-loader/postcss": "8.4.49",
     "react-scripts/@svgr/webpack/**/nth-check": "2.1.1"
+  },
+  "jest": {
+    "moduleNameMapper": {
+      "^axios$": "axios/dist/node/axios.cjs",
+      "^antd/es/(.*)$": "antd/lib/$1"
+    }
   }
 }

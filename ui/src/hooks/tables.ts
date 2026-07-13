@@ -14,6 +14,7 @@ import type {
   Model,
   PathParam,
   QueryParam,
+  RequestBody,
   Route,
   SuccessResponseBody,
 } from '../utils/openapi';
@@ -142,6 +143,57 @@ export function useDeleteTable({ full_name }: UseDeleteTableArgs) {
       queryClient.invalidateQueries({
         queryKey: ['listTables', catalog, schema],
       });
+      // Drop any cached getTable for this name so a later recreate of the same
+      // name doesn't render the deleted table's schema from cache.
+      queryClient.invalidateQueries({ queryKey: ['getTable'] });
+    },
+  });
+}
+
+export interface CreateTableMutationParams
+  extends RequestBody<CatalogApi, '/tables', 'post'> {}
+
+export function useCreateTable() {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    SuccessResponseBody<CatalogApi, '/tables', 'post'>,
+    Error,
+    CreateTableMutationParams
+  >({
+    mutationFn: async (params: CreateTableMutationParams) => {
+      const response = await (route as Route<CatalogApi>)({
+        client: CLIENT,
+        request: {
+          path: '/tables',
+          method: 'post',
+          params: {
+            body: params,
+          },
+        },
+        // NOTE:
+        // Creation is authorized on the server (schema owner / CREATE TABLE);
+        // a 403 message from the server is surfaced to the caller as-is.
+        errorMessage: 'Failed to create table',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      } else {
+        return response.data;
+      }
+    },
+    onSuccess: (_table, variables) => {
+      // Invalidate using the REQUEST params (always present), not the response
+      // body whose catalog_name/schema_name are optional and may be omitted.
+      queryClient.invalidateQueries({
+        queryKey: ['listTables', variables.catalog_name, variables.schema_name],
+      });
+      // Ensure the detail page shows the freshly-created table, not a stale
+      // cache entry left from a previously-deleted table of the same name.
+      queryClient.invalidateQueries({ queryKey: ['getTable'] });
     },
   });
 }

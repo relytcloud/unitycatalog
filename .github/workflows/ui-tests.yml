@@ -1,0 +1,44 @@
+name: UI Tests
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'ui/**'
+      - '.github/workflows/ui-tests.yml'
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'ui/**'
+      - '.github/workflows/ui-tests.yml'
+
+jobs:
+  ui-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '18'
+          cache: 'yarn'
+          cache-dependency-path: ui/yarn.lock
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile --network-timeout 1000000
+
+      # Jest unit + component tests (all HTTP is mocked; no external services).
+      - name: Run unit + component tests
+        run: CI=true yarn test --watchAll=false
+
+      # Production build type-checks the whole app (tsc is stricter than jest).
+      - name: Production build
+        run: yarn build

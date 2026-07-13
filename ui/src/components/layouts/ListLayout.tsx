@@ -1,5 +1,6 @@
 import { SearchOutlined } from '@ant-design/icons';
 import {
+  Alert,
   Col,
   Flex,
   Input,
@@ -12,6 +13,10 @@ import { AnyObject } from 'antd/es/_util/type';
 import { ReactNode, useMemo, useState } from 'react';
 import styles from './ListLayout.module.css';
 
+// Page-size options shown by the table's size changer, with 20 as the default.
+export const PAGE_SIZE_OPTIONS = [20, 50, 100];
+const DEFAULT_PAGE_SIZE = 20;
+
 interface ListLayoutProps<T> {
   data: T[] | undefined;
   columns: TableColumnsType<T>;
@@ -21,6 +26,12 @@ interface ListLayoutProps<T> {
   loading?: boolean;
   filters?: ReactNode;
   showSearch?: boolean;
+  // Error from the data query; when set, an alert replaces the table so a
+  // failed load is never shown as an empty ("no data") list.
+  error?: Error | null;
+  // Text a row is matched against by the search box. Defaults to the row's
+  // name; pass a custom accessor to also search other fields (e.g. email).
+  searchText?: (item: T) => string;
 }
 
 export default function ListLayout<T extends AnyObject = AnyObject>({
@@ -32,16 +43,21 @@ export default function ListLayout<T extends AnyObject = AnyObject>({
   loading,
   filters,
   showSearch = true,
+  error,
+  searchText,
 }: ListLayoutProps<T>) {
   const [filterValue, setFilterValue] = useState('');
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
 
   const filteredData = useMemo(() => {
     if (!filterValue) return data;
+    const needle = filterValue.toLowerCase();
     return data?.filter((item) =>
-      String(item.name).toLowerCase().includes(filterValue.toLowerCase()),
+      (searchText ? searchText(item) : String(item.name))
+        .toLowerCase()
+        .includes(needle),
     );
-  }, [data, filterValue]);
+  }, [data, filterValue, searchText]);
 
   const onShowSizeChange = (current: number, pageSize: number) => {
     setPageSize(pageSize);
@@ -50,6 +66,14 @@ export default function ListLayout<T extends AnyObject = AnyObject>({
   return (
     <Flex gap="middle" vertical style={{ flexGrow: 1 }}>
       {title}
+      {error && (
+        <Alert
+          type="error"
+          showIcon
+          message="Failed to load"
+          description={error.message}
+        />
+      )}
       {showSearch && (
         <Row gutter={[8, 8]}>
           <Col
@@ -73,11 +97,12 @@ export default function ListLayout<T extends AnyObject = AnyObject>({
         rowKey={rowKey}
         loading={loading}
         className={onRowClick ? styles.clickableListLayout : undefined}
-        dataSource={filteredData}
+        dataSource={error ? [] : filteredData}
         columns={columns}
         pagination={{
-          hideOnSinglePage: true,
           pageSize: pageSize,
+          showSizeChanger: true,
+          pageSizeOptions: PAGE_SIZE_OPTIONS,
           onShowSizeChange: onShowSizeChange,
           showTotal: (total, range) => `${range[0]}-${range[1]} of ${total}`,
         }}
