@@ -10,8 +10,10 @@ import {
 } from 'antd';
 import {
   createBrowserRouter,
+  Navigate,
   Outlet,
   RouterProvider,
+  useLocation,
   useNavigate,
 } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -30,6 +32,10 @@ import Login from './pages/Login';
 import { AuthProvider, useAuth } from './context/auth-context';
 import { UserOutlined } from '@ant-design/icons';
 import ModelVersionDetails from './pages/ModelVersionDetails';
+import ExternalData from './pages/ExternalData';
+import CredentialDetails from './pages/CredentialDetails';
+import ExternalLocationDetails from './pages/ExternalLocationDetails';
+import UsersList from './pages/UsersList';
 
 // TODO:
 // As of [19/02/2025], this implementation should be updated once the following PR are merged.
@@ -73,6 +79,30 @@ const router = createBrowserRouter([
         path: '/models/:catalog/:schema/:model/versions/:version',
         element: <ModelVersionDetails />,
       },
+      {
+        path: '/external-data',
+        element: <Navigate to="/external-data/external-locations" replace />,
+      },
+      {
+        path: '/external-data/external-locations',
+        element: <ExternalData />,
+      },
+      {
+        path: '/external-data/credentials',
+        element: <ExternalData />,
+      },
+      {
+        path: '/external-data/external-locations/:name',
+        element: <ExternalLocationDetails />,
+      },
+      {
+        path: '/external-data/credentials/:name',
+        element: <CredentialDetails />,
+      },
+      {
+        path: '/users',
+        element: <UsersList />,
+      },
     ],
   },
 ]);
@@ -80,6 +110,13 @@ const router = createBrowserRouter([
 function AppProvider() {
   const { logout, currentUser } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+
+  const selectedNavKey = pathname.startsWith('/external-data')
+    ? 'external-data'
+    : pathname.startsWith('/users')
+      ? 'users'
+      : 'catalogs';
 
   const profileMenuItems = useMemo(
     (): MenuProps['items'] => [
@@ -146,12 +183,22 @@ function AppProvider() {
             <Menu
               theme="dark"
               mode="horizontal"
-              defaultSelectedKeys={['catalogs']}
+              selectedKeys={[selectedNavKey]}
               items={[
                 {
                   key: 'catalogs',
                   label: 'Catalogs',
                   onClick: () => navigate('/'),
+                },
+                {
+                  key: 'external-data',
+                  label: 'External Data',
+                  onClick: () => navigate('/external-data'),
+                },
+                {
+                  key: 'users',
+                  label: 'Users',
+                  onClick: () => navigate('/users'),
                 },
               ]}
               style={{ flex: 1, minWidth: 0 }}
@@ -215,7 +262,12 @@ function AppProvider() {
 
 function App() {
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { staleTime: QUERY_STALE_TIME } },
+    defaultOptions: {
+      // No retry: these are authenticated admin CRUD reads — a 401/403/404 is
+      // deterministic, and the default 3 retries just delayed the error state
+      // by several seconds of blank UI.
+      queries: { staleTime: QUERY_STALE_TIME, retry: false },
+    },
   });
 
   return authEnabled ? (

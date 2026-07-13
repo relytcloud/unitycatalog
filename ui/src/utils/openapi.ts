@@ -82,6 +82,7 @@ export type HttpErrorCode =
  */
 export type MediaType =
   | 'application/json' // JSON
+  | 'application/scim+json' // SCIM JSON (RFC 7644)
   | 'application/x-www-form-urlencoded'; // URL Encoded Form
 
 /**
@@ -374,11 +375,17 @@ export function route<
   }): response is ErrorResponseBody<Api, Path, Method, ErrorCode, MediaType> =>
     false,
 }: RouteArgs<Api, Path, Method, ErrorCode>) {
-  // Converts a path like {key} into its actual value.
+  // Converts a path like {key} into its actual value. The value is a single
+  // path segment (a resource name / dotted full-name), so percent-encode it:
+  // a name containing '/', '%', '?' or '#' would otherwise change the request
+  // URL's structure. A replacer FUNCTION is used (not a string) so special
+  // replacement patterns like '$&' in the value are treated literally.
   const path = () =>
     Object.entries(request.params?.paths ?? {}).reduce(
       (acc, [key, value]) =>
-        acc.replace(new RegExp(`\\{${key}\\}`), String(value)),
+        acc.replace(new RegExp(`\\{${key}\\}`), () =>
+          encodeURIComponent(String(value)),
+        ),
       request.path as string,
     );
 
