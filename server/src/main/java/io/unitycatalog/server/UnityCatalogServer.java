@@ -8,11 +8,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.linecorp.armeria.common.HttpResponse;
+import com.linecorp.armeria.common.metric.MeterIdPrefixFunction;
+import com.linecorp.armeria.common.metric.PrometheusMeterRegistries;
 import com.linecorp.armeria.server.Server;
 import com.linecorp.armeria.server.ServerBuilder;
 import com.linecorp.armeria.server.annotation.JacksonRequestConverterFunction;
 import com.linecorp.armeria.server.annotation.JacksonResponseConverterFunction;
 import com.linecorp.armeria.server.docs.DocService;
+import com.linecorp.armeria.server.metric.MetricCollectingService;
+import com.linecorp.armeria.server.metric.PrometheusExpositionService;
+import io.micrometer.prometheus.PrometheusMeterRegistry;
 import io.unitycatalog.server.auth.AllowingAuthorizer;
 import io.unitycatalog.server.auth.JCasbinAuthorizer;
 import io.unitycatalog.server.auth.UnityCatalogAuthorizer;
@@ -99,9 +104,19 @@ public class UnityCatalogServer {
   }
 
   private Server initializeServer(UnityCatalogServer.Builder unityCatalogServerBuilder) {
+    // Expose Prometheus metrics at /metrics so per-route request counts (e.g.
+    // credential vending) are scrapeable. MetricCollectingService records every
+    // route; PrometheusExpositionService serves the registry.
+    PrometheusMeterRegistry meterRegistry = PrometheusMeterRegistries.newRegistry();
     ServerBuilder armeriaServerBuilder =
         Server.builder()
             .http(unityCatalogServerBuilder.port)
+            .meterRegistry(meterRegistry)
+            .decorator(
+                MetricCollectingService.newDecorator(
+                    MeterIdPrefixFunction.ofDefault("armeria.server")))
+            .service(
+                "/metrics", PrometheusExpositionService.of(meterRegistry.getPrometheusRegistry()))
             .serviceUnder("/docs", new DocService());
 
     // Init hibernate
