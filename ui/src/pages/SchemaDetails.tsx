@@ -14,6 +14,7 @@ import SchemaActionsDropdown from '../components/schemas/SchemaActionDropdown';
 import { EditSchemaDescriptionModal } from '../components/modals/EditSchemaDescriptionModal';
 import { useNotification } from '../utils/NotificationContext';
 import ModelsList from '../components/models/ModelsList';
+import CreateTableAction from '../components/tables/CreateTableAction';
 
 export enum SchemaTabs {
   Tables = 'Tables',
@@ -63,6 +64,7 @@ export default function SchemaDetails() {
               <DatabaseOutlined /> {schemaFullName}
             </Typography.Title>
             <Flex gap="middle">
+              <CreateTableAction catalog={catalog} schema={schema} />
               <SchemaActionsDropdown catalog={catalog} schema={schema} />
               {/*<CreateAssetsDropdown catalog={catalog} schema={schema} />*/}
             </Flex>
