@@ -2,13 +2,15 @@ import { Button, Form, Modal, Select, Typography } from 'antd';
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNotification } from '../../utils/NotificationContext';
 import { PrivilegeType, useUpdatePermissions } from '../../hooks/permissions';
-import { useListScimUsers } from '../../hooks/users';
+import { useScimUserOptions } from '../../hooks/users';
 import { useListCatalogs } from '../../hooks/catalog';
-import { useListCredentials } from '../../hooks/credentials';
-import { useListExternalLocations } from '../../hooks/externalLocations';
 import { Privilege, SecurableType } from '../../types/api/catalog.gen';
 
 // The privileges that make sense per securable type (grantable subset).
+// External locations and credentials are deliberately absent: their grant UI
+// was removed with issue #6 (catalog/schema/table use the simplified
+// read/create panel instead; this raw modal keeps only the metastore- and
+// catalog-level admin grants).
 const PRIVILEGES_BY_SECURABLE: Record<string, PrivilegeType[]> = {
   [SecurableType.metastore]: [
     Privilege.CREATE_CATALOG,
@@ -16,24 +18,6 @@ const PRIVILEGES_BY_SECURABLE: Record<string, PrivilegeType[]> = {
     Privilege.CREATE_STORAGE_CREDENTIAL,
   ],
   [SecurableType.catalog]: [Privilege.USE_CATALOG, Privilege.CREATE_SCHEMA],
-  [SecurableType.schema]: [
-    Privilege.USE_SCHEMA,
-    Privilege.CREATE_TABLE,
-    Privilege.CREATE_FUNCTION,
-    Privilege.CREATE_VOLUME,
-    Privilege.CREATE_MODEL,
-  ],
-  [SecurableType.table]: [Privilege.SELECT, Privilege.MODIFY],
-  [SecurableType.volume]: [Privilege.READ_VOLUME],
-  [SecurableType.function]: [Privilege.EXECUTE],
-  [SecurableType.external_location]: [
-    Privilege.CREATE_EXTERNAL_TABLE,
-    Privilege.READ_FILES,
-    Privilege.WRITE_FILES,
-    Privilege.CREATE_EXTERNAL_VOLUME,
-    Privilege.CREATE_MANAGED_STORAGE,
-  ],
-  [SecurableType.credential]: [Privilege.CREATE_EXTERNAL_LOCATION],
 };
 
 interface GrantPermissionFormValues {
@@ -66,10 +50,8 @@ export function GrantPermissionModal({
   const securableLocked = !!securableType && !!fullName;
   const watchedSecurable = Form.useWatch('securable', form);
 
-  const { data: usersData } = useListScimUsers();
+  const userOptions = useScimUserOptions();
   const { data: catalogsData } = useListCatalogs();
-  const { data: credentialsData } = useListCredentials();
-  const { data: locationsData } = useListExternalLocations();
 
   // Reset the form each time the modal opens so a prior grant's values don't
   // linger (the useForm store outlives destroyOnClose, which only unmounts
@@ -77,26 +59,6 @@ export function GrantPermissionModal({
   useEffect(() => {
     if (open) form.resetFields();
   }, [open, form]);
-
-  // Users are searched with contains (%xx%) semantics on name AND email.
-  // The Select value is the email (the grant principal), so dedupe by email
-  // to avoid duplicate option values when two accounts share an address.
-  const userOptions = useMemo(() => {
-    const seen = new Set<string>();
-    return (usersData?.Resources ?? []).flatMap((user) => {
-      const email = (
-        user.emails?.find((candidate) => candidate.primary) ?? user.emails?.[0]
-      )?.value;
-      if (!email || seen.has(email)) return [];
-      seen.add(email);
-      return [
-        {
-          value: email,
-          label: `${user.displayName ?? email} (${email})`,
-        },
-      ];
-    });
-  }, [usersData]);
 
   const securableOptions = useMemo(() => {
     const options = [
@@ -108,17 +70,9 @@ export function GrantPermissionModal({
         value: `${SecurableType.catalog}:${catalog.name}`,
         label: `catalog: ${catalog.name}`,
       })),
-      ...(credentialsData?.credentials ?? []).map((credential) => ({
-        value: `${SecurableType.credential}:${credential.name}`,
-        label: `credential: ${credential.name}`,
-      })),
-      ...(locationsData?.external_locations ?? []).map((location) => ({
-        value: `${SecurableType.external_location}:${location.name}`,
-        label: `external location: ${location.name}`,
-      })),
     ];
     return options;
-  }, [catalogsData, credentialsData, locationsData]);
+  }, [catalogsData]);
 
   const effectiveSecurableType = securableLocked
     ? securableType
