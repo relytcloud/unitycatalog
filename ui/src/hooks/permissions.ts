@@ -132,6 +132,8 @@ export function useUpdatePermissions() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['getPermissions'] });
       queryClient.invalidateQueries({ queryKey: ['userPermissions'] });
+      queryClient.invalidateQueries({ queryKey: ['userAccess'] });
+      queryClient.invalidateQueries({ queryKey: ['ownGrants'] });
     },
   });
 }

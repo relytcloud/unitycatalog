@@ -69,6 +69,30 @@ export function useListScimUsers() {
   });
 }
 
+/**
+ * Users as antd Select options for principal pickers, searched with contains
+ * (%xx%) semantics on name AND email. The option value is the email (the
+ * grant principal), deduped so two accounts sharing an address don't produce
+ * duplicate option values.
+ */
+export function useScimUserOptions() {
+  const { data } = useListScimUsers();
+  const seen = new Set<string>();
+  return (data?.Resources ?? []).flatMap((user) => {
+    const email = (
+      user.emails?.find((candidate) => candidate.primary) ?? user.emails?.[0]
+    )?.value;
+    if (!email || seen.has(email)) return [];
+    seen.add(email);
+    return [
+      {
+        value: email,
+        label: `${user.displayName ?? email} (${email})`,
+      },
+    ];
+  });
+}
+
 export interface CreateScimUserMutationParams
   extends RequestBody<ControlApi, '/scim2/Users', 'post'> {}
 

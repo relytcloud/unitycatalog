@@ -1,12 +1,16 @@
 import React from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useGetTable } from '../hooks/tables';
+import { useGetSchema } from '../hooks/schemas';
+import { useGetCatalog } from '../hooks/catalog';
 import DetailsLayout from '../components/layouts/DetailsLayout';
 import { Flex, Typography } from 'antd';
 import ColumnsList from '../components/tables/ColumnsList';
 import TableSidebar from '../components/tables/TablesSidebar';
 import { TableOutlined } from '@ant-design/icons';
-import TableActionsDropdown from '../components/tables/TableActionsDropdown';
+import DropTableButton from '../components/tables/DropTableButton';
+import AccessPanel from '../components/access/AccessPanel';
+import { SecurableType } from '../types/api/catalog.gen';
 
 export default function TableDetails() {
   const { catalog, schema, table } = useParams();
@@ -17,10 +21,17 @@ export default function TableDetails() {
   const { data } = useGetTable({
     full_name: [catalog, schema, table].join('.'),
   });
+  // Ancestor owners participate in button gating (a catalog/schema owner may
+  // drop the table or manage its grants); the server re-authorizes anyway.
+  const { data: schemaData } = useGetSchema({
+    full_name: [catalog, schema].join('.'),
+  });
+  const { data: catalogData } = useGetCatalog({ name: catalog });
 
   if (!data) return null;
 
   const tableFullName = [catalog, schema, table].join('.');
+  const owners = [data.owner, schemaData?.owner, catalogData?.owner];
   return (
     <DetailsLayout
       title={
@@ -28,10 +39,11 @@ export default function TableDetails() {
           <Typography.Title level={3}>
             <TableOutlined /> {tableFullName}
           </Typography.Title>
-          <TableActionsDropdown
+          <DropTableButton
             catalog={catalog}
             schema={schema}
             table={table}
+            owners={owners}
           />
         </Flex>
       }
@@ -57,6 +69,11 @@ export default function TableDetails() {
             </Typography.Text>
           </div>
           <ColumnsList catalog={catalog} schema={schema} table={table} />
+          <AccessPanel
+            securableType={SecurableType.table}
+            fullName={tableFullName}
+            owners={owners}
+          />
         </Flex>
       </DetailsLayout.Content>
       <DetailsLayout.Aside>

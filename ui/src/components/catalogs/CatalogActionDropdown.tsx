@@ -2,9 +2,13 @@ import { DeleteOutlined, MoreOutlined } from '@ant-design/icons';
 import { Button, Dropdown, MenuProps } from 'antd';
 import { useMemo, useState } from 'react';
 import { DeleteCatalogModal } from '../modals/DeleteCatalogModal';
+import { useAuthorized } from '../../hooks/authz';
+import { Privilege, SecurableType } from '../../types/api/catalog.gen';
 
 interface CatalogActionDropdownProps {
   catalog: string;
+  /** The catalog's owner, if known — a positive gating signal only. */
+  catalogOwner?: string;
 }
 
 enum CatalogActionsEnum {
@@ -13,9 +17,20 @@ enum CatalogActionsEnum {
 
 export default function CatalogActionsDropdown({
   catalog,
+  catalogOwner,
 }: CatalogActionDropdownProps) {
   const [dropdownVisible, setDropdownVisible] = useState<boolean>(false);
   const [action, setAction] = useState<CatalogActionsEnum | null>(null);
+  // Server rule for DELETE /catalogs: metastore OWNER, or catalog
+  // OWNER/USE_CATALOG.
+  const canDelete = useAuthorized([
+    {
+      securableType: SecurableType.catalog,
+      fullName: catalog,
+      anyOf: [Privilege.USE_CATALOG],
+      ownerAnyOf: [catalogOwner],
+    },
+  ]);
 
   const menuItems = useMemo(
     (): MenuProps['items'] => [
@@ -25,9 +40,10 @@ export default function CatalogActionsDropdown({
         onClick: () => setAction(CatalogActionsEnum.Delete),
         icon: <DeleteOutlined />,
         danger: true,
+        disabled: !canDelete.allowed,
       },
     ],
-    [],
+    [canDelete.allowed],
   );
 
   return (
