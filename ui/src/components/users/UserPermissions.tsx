@@ -1,5 +1,14 @@
-import { useMemo, useState } from 'react';
-import { Alert, Button, Flex, Modal, Table, Tag, Typography } from 'antd';
+import { useState } from 'react';
+import {
+  Alert,
+  Button,
+  Flex,
+  Modal,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
+} from 'antd';
 import { PlusOutlined } from '@ant-design/icons';
 import {
   PrivilegeType,
@@ -7,9 +16,8 @@ import {
   useUpdatePermissions,
   useUserPermissions,
 } from '../../hooks/permissions';
-import { useListCatalogs } from '../../hooks/catalog';
-import { useListCredentials } from '../../hooks/credentials';
-import { useListExternalLocations } from '../../hooks/externalLocations';
+import { useAllSecurableRefs } from '../../hooks/userAccess';
+import { useAuthorized } from '../../hooks/authz';
 import { useNotification } from '../../utils/NotificationContext';
 import { GrantPermissionModal } from '../permissions/GrantPermissionModal';
 import { SecurableType } from '../../types/api/catalog.gen';
@@ -19,42 +27,31 @@ interface UserPermissionsProps {
 }
 
 /**
- * Aggregated view of one user's privileges across the metastore, catalogs,
- * credentials and external locations (one filtered permissions query per
- * securable; schemas/tables are managed from their own detail pages).
+ * Summary of one user's privileges across catalogs and schemas (one filtered
+ * permissions query per securable — schemas are enumerated per catalog, so
+ * the fan-out is bounded but real). Tables are NOT queried here: the full
+ * catalog→schema→table scan lives behind the explicit "Details" button on
+ * the Users list (see UserAccessDetails and its server-load warning).
+ * External locations / credentials are no longer granted through the UI.
  */
 export default function UserPermissions({ principal }: UserPermissionsProps) {
-  const { data: catalogsData } = useListCatalogs();
-  const { data: credentialsData } = useListCredentials();
-  const { data: locationsData } = useListExternalLocations();
+  const { data: securables } = useAllSecurableRefs();
   const mutation = useUpdatePermissions();
   const { setNotification } = useNotification();
   const [grantOpen, setGrantOpen] = useState(false);
-
-  const securables = useMemo((): SecurableRef[] => {
-    return [
-      { securable_type: SecurableType.metastore, full_name: 'metastore' },
-      ...(catalogsData?.catalogs ?? []).map((catalog) => ({
-        securable_type: SecurableType.catalog,
-        full_name: catalog.name ?? '',
-      })),
-      ...(credentialsData?.credentials ?? []).map((credential) => ({
-        securable_type: SecurableType.credential,
-        full_name: credential.name ?? '',
-      })),
-      ...(locationsData?.external_locations ?? []).map((location) => ({
-        securable_type: SecurableType.external_location,
-        full_name: location.name ?? '',
-      })),
-    ].filter((securable) => securable.full_name);
-  }, [catalogsData, credentialsData, locationsData]);
+  // Managing another user's grants is an owner/metastore-admin operation;
+  // gate on the metastore owner-side signal (fail-open when identity is
+  // unknown). The server re-authorizes every change regardless.
+  const manage = useAuthorized([
+    { securableType: SecurableType.metastore, fullName: 'metastore' },
+  ]);
 
   const {
     data: userPrivileges,
     isLoading,
     isError,
     error,
-  } = useUserPermissions(principal, securables);
+  } = useUserPermissions(principal, securables ?? []);
 
   const revoke = (securable: SecurableRef, privilege: PrivilegeType) => {
     mutation.mutate(
@@ -95,18 +92,28 @@ export default function UserPermissions({ principal }: UserPermissionsProps) {
         <Typography.Title level={5} style={{ margin: 0 }}>
           Permissions
         </Typography.Title>
-        <Button
-          size="small"
-          type="primary"
-          icon={<PlusOutlined />}
-          onClick={() => setGrantOpen(true)}
+        <Tooltip
+          title={
+            manage.ready && !manage.allowed
+              ? 'Granting requires ownership (metastore admin / securable owner); the server enforces this.'
+              : undefined
+          }
         >
-          Grant
-        </Button>
+          <Button
+            size="small"
+            type="primary"
+            icon={<PlusOutlined />}
+            disabled={!manage.allowed}
+            onClick={() => setGrantOpen(true)}
+          >
+            Grant
+          </Button>
+        </Tooltip>
       </Flex>
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        Privileges on the metastore, catalogs, credentials and external
-        locations. Schema/table grants are managed from their own pages.
+        Privileges on catalogs and schemas. Table access is granted from each
+        table's page; use "Details" on the Users list for the full per-user view
+        including tables.
       </Typography.Text>
       {isError && (
         <Alert
@@ -124,7 +131,9 @@ export default function UserPermissions({ principal }: UserPermissionsProps) {
         }
         dataSource={isError ? [] : (userPrivileges ?? [])}
         pagination={{ hideOnSinglePage: true, pageSize: 10 }}
-        locale={{ emptyText: 'No privileges granted to this user' }}
+        locale={{
+          emptyText: 'No catalog/schema privileges granted to this user',
+        }}
         columns={[
           {
             title: 'Securable',
@@ -145,12 +154,12 @@ export default function UserPermissions({ principal }: UserPermissionsProps) {
                 {record.privileges.map((privilege) => (
                   <Tag
                     key={privilege}
-                    closable
+                    closable={manage.allowed}
                     onClose={(e) => {
                       e.preventDefault();
                       confirmRevoke(record, privilege);
                     }}
-                    style={{ cursor: 'pointer' }}
+                    style={{ cursor: manage.allowed ? 'pointer' : 'default' }}
                   >
                     {privilege}
                   </Tag>
