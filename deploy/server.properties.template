@@ -10,7 +10,10 @@ server.client-id=
 server.client-secret=
 server.redirect-port=
 
-# Trusted external issuers (= Relyt instance ids, comma-separated). Changing requires a restart.
+# OPTIONAL extra trusted issuers (comma-separated). Trusted issuers are derived primarily from the
+# JWKS file below (each key's "issuer" member, hot-reloaded); this list is a UNION on top, only for
+# issuers NOT in the local JWKS (e.g. OIDC discovery), and is a startup snapshot (changing needs a
+# restart). Leave empty to be governed entirely by the JWKS (recommended for Relyt).
 server.allowed-issuers=${UC_ALLOWED_ISSUERS}
 # Expected JWT audiences (must match the subject_token aud).
 server.audiences=${UC_AUDIENCES}

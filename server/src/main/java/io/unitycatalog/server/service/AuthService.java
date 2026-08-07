@@ -47,6 +47,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -136,12 +137,21 @@ public class AuthService {
           ErrorCode.INVALID_ARGUMENT, "Authorization is disabled");
     }
 
+    // Trusted issuers are the UNION of two sources (issue #4):
+    //  - knownIssuers(): derived fresh from the hot-reloaded external JWKS file, so onboarding a
+    //    new DWSU only needs appending its key to the JWKS ConfigMap -- no UC restart, no
+    //    server.properties change (the recommended path for Relyt instances).
+    //  - server.allowed-issuers: a startup-snapshot list, kept for issuers NOT in the local JWKS
+    //    (e.g. OIDC well-known discovery issuers) and for backward compatibility. Leave it empty to
+    //    be governed entirely by the JWKS.
+    Set<String> knownIssuers = jwksOperations.knownIssuers();
     List<String> allowedIssuers = serverProperties.getAllowedIssuers();
-    if (allowedIssuers.isEmpty()) {
-      LOGGER.error("No allowed issuers configured");
+    if (knownIssuers.isEmpty() && allowedIssuers.isEmpty()) {
+      LOGGER.error("No trusted issuers configured");
       throw new OAuthInvalidRequestException(
           ErrorCode.INVALID_ARGUMENT,
-          "No allowed issuers configured. Set server.allowed-issuers in server.properties");
+          "No trusted issuers configured. Register a DWSU key (with an \"issuer\" member) in the "
+              + "external JWKS file (server.external-jwks-file), or set server.allowed-issuers.");
     }
 
     List<String> audiences = serverProperties.getAudiences();
@@ -163,8 +173,9 @@ public class AuthService {
 
     String issuer = decodedJWT.getIssuer();
 
-    // Validate issuer is in allowlist BEFORE fetching JWKS
-    if (!allowedIssuers.contains(issuer)) {
+    // Validate issuer BEFORE fetching JWKS: trusted if present in the JWKS-derived set OR the
+    // configured allow-list (union).
+    if (!knownIssuers.contains(issuer) && !allowedIssuers.contains(issuer)) {
       LOGGER.debug("Token rejected: invalid issuer '{}'", issuer);
       throw new OAuthInvalidRequestException(ErrorCode.UNAUTHENTICATED, "Invalid issuer");
     }

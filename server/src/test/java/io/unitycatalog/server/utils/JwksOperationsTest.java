@@ -70,4 +70,65 @@ public class JwksOperationsTest {
 
     assertThatThrownBy(() -> provider.get("kidNoIssuer")).isInstanceOf(JwkException.class);
   }
+
+  private JwksOperations opsForJwks(String jwksJson) throws Exception {
+    Path jwksFile = Files.createTempFile("jwks", ".json");
+    Files.writeString(jwksFile, jwksJson);
+    ServerProperties serverProperties = mock(ServerProperties.class);
+    when(serverProperties.getExternalJwksFile()).thenReturn(jwksFile.toString());
+    return new JwksOperations(mock(SecurityContext.class), serverProperties);
+  }
+
+  @Test
+  public void knownIssuersReturnsDistinctIssuersAcrossKeys() throws Exception {
+    // Two issuers, and a second key for issuer-a: the result is the deduplicated set of issuers.
+    String jwks =
+        "{\"keys\":["
+            + entry("kidA1", X_A, Y_A, "issuer-a")
+            + ","
+            + entry("kidA2", X_B, Y_B, "issuer-a")
+            + ","
+            + entry("kidB", X_B, Y_B, "issuer-b")
+            + "]}";
+
+    assertThat(opsForJwks(jwks).knownIssuers()).containsExactlyInAnyOrder("issuer-a", "issuer-b");
+  }
+
+  @Test
+  public void knownIssuersIgnoresKeysWithoutIssuerMember() throws Exception {
+    // A key with no "issuer" member cannot be used to verify any token (see
+    // keyWithoutIssuerMemberIsRejected) and must not contribute a trusted issuer either.
+    String jwks =
+        "{\"keys\":["
+            + entry("kidA", X_A, Y_A, "issuer-a")
+            + ","
+            + entry("kidNoIssuer", X_B, Y_B, null)
+            + "]}";
+
+    assertThat(opsForJwks(jwks).knownIssuers()).containsExactlyInAnyOrder("issuer-a");
+  }
+
+  @Test
+  public void knownIssuersEmptyForEmptyKeyArray() throws Exception {
+    assertThat(opsForJwks("{\"keys\":[]}").knownIssuers()).isEmpty();
+  }
+
+  @Test
+  public void knownIssuersEmptyWhenFileMissing() {
+    // Fail-closed: a configured-but-absent file yields no trusted issuers rather than throwing.
+    ServerProperties serverProperties = mock(ServerProperties.class);
+    when(serverProperties.getExternalJwksFile()).thenReturn("/no/such/uc-jwks-file.json");
+    JwksOperations ops = new JwksOperations(mock(SecurityContext.class), serverProperties);
+
+    assertThat(ops.knownIssuers()).isEmpty();
+  }
+
+  @Test
+  public void knownIssuersEmptyWhenNotConfigured() {
+    ServerProperties serverProperties = mock(ServerProperties.class);
+    when(serverProperties.getExternalJwksFile()).thenReturn(null);
+    JwksOperations ops = new JwksOperations(mock(SecurityContext.class), serverProperties);
+
+    assertThat(ops.knownIssuers()).isEmpty();
+  }
 }

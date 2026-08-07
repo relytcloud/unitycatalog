@@ -117,9 +117,49 @@ public interface AliyunCredentialGenerator {
             .expirationTimeInEpochMillis(Instant.parse(credentials.getExpiration()).toEpochMilli())
             .build();
       } catch (com.aliyuncs.exceptions.ClientException e) {
-        throw new BaseException(
-            ErrorCode.INTERNAL, "Failed to assume Aliyun RAM role: " + e.getMessage(), e);
+        throw translateAssumeRoleFailure(roleArn, e);
       }
+    }
+
+    /**
+     * Maps an Aliyun STS {@link com.aliyuncs.exceptions.ClientException} to a {@link BaseException}
+     * with an appropriate error code. A misconfigured credential -- role ARN that does not exist,
+     * is malformed, or cannot be assumed by this identity -- is a user/admin error and must surface
+     * as a 4xx; the previous blanket {@link ErrorCode#INTERNAL} (500) reads as a server bug,
+     * misleads callers into retrying, and pollutes server error metrics. Genuinely
+     * transient/server-side failures stay 500.
+     */
+    private static BaseException translateAssumeRoleFailure(
+        String roleArn, com.aliyuncs.exceptions.ClientException e) {
+      String errCode = e.getErrCode();
+      String detail = e.getErrMsg() != null ? e.getErrMsg() : e.getMessage();
+      String message =
+          "Failed to assume Aliyun RAM role '"
+              + roleArn
+              + "'"
+              + (errCode == null ? "" : " (Aliyun error " + errCode + ")")
+              + ": "
+              + detail;
+      if (errCode == null) {
+        // No structured error code (e.g. network/timeout): treat as a transient server-side
+        // failure.
+        return new BaseException(ErrorCode.INTERNAL, message, e);
+      }
+      if (errCode.startsWith("EntityNotExist")
+          || errCode.startsWith("InvalidParameter")
+          || errCode.equals("InvalidAccessKeyId.NotFound")
+          || errCode.equals("SignatureDoesNotMatch")) {
+        // Role missing / ARN malformed / server credential wrong: a misconfiguration, not a bug.
+        return new BaseException(ErrorCode.FAILED_PRECONDITION, message, e);
+      }
+      if (errCode.equals("NoPermission")
+          || errCode.startsWith("NoPermission.")
+          || errCode.equals("AccessDenied")) {
+        // Role exists but cannot be assumed with the current identity / trust policy.
+        return new BaseException(ErrorCode.PERMISSION_DENIED, message, e);
+      }
+      // Throttling / ServiceUnavailable / InternalError / unknown: transient or server-side.
+      return new BaseException(ErrorCode.INTERNAL, message, e);
     }
   }
 }

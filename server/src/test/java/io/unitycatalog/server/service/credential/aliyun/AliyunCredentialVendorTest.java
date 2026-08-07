@@ -2,15 +2,18 @@ package io.unitycatalog.server.service.credential.aliyun;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.aliyuncs.IAcsClient;
+import com.aliyuncs.exceptions.ClientException;
 import com.aliyuncs.sts.model.v20150401.AssumeRoleRequest;
 import com.aliyuncs.sts.model.v20150401.AssumeRoleResponse;
 import io.unitycatalog.server.exception.BaseException;
+import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.model.AliyunRamRoleResponse;
 import io.unitycatalog.server.model.TemporaryCredentials;
 import io.unitycatalog.server.persist.dao.CredentialDAO;
@@ -195,5 +198,57 @@ public class AliyunCredentialVendorTest {
     assertThatThrownBy(
             () -> generator.generate(context("oss://bkt/data", Optional.empty(), Privilege.SELECT)))
         .isInstanceOf(BaseException.class);
+  }
+
+  // Issue #9: a misconfigured RAM role (role missing / not assumable) must surface as a 4xx, not a
+  // blanket INTERNAL (500). The error code is classified from ClientException.getErrCode().
+
+  @Test
+  public void stsGeneratorMapsRoleNotFoundToFailedPrecondition() throws Exception {
+    // EntityNotExist.Role -> the configured role ARN does not exist: user/admin misconfiguration.
+    assertAssumeRoleErrorMapsTo(
+        new ClientException("EntityNotExist.Role", "The specified Role not exists."),
+        ErrorCode.FAILED_PRECONDITION);
+  }
+
+  @Test
+  public void stsGeneratorMapsInvalidRoleArnToFailedPrecondition() throws Exception {
+    assertAssumeRoleErrorMapsTo(
+        new ClientException(
+            "InvalidParameter.RoleArn", "The specified parameter RoleArn is wrong."),
+        ErrorCode.FAILED_PRECONDITION);
+  }
+
+  @Test
+  public void stsGeneratorMapsNoPermissionToPermissionDenied() throws Exception {
+    // Role exists but cannot be assumed by this identity / its trust policy.
+    assertAssumeRoleErrorMapsTo(
+        new ClientException("NoPermission", "You are not authorized to do this action."),
+        ErrorCode.PERMISSION_DENIED);
+  }
+
+  @Test
+  public void stsGeneratorMapsTransientErrorToInternal() throws Exception {
+    // Genuinely server-side / transient failures stay 500 so the retry semantics are preserved.
+    assertAssumeRoleErrorMapsTo(
+        new ClientException(
+            "ServiceUnavailable", "The request has failed due to a temporary error."),
+        ErrorCode.INTERNAL);
+  }
+
+  private void assertAssumeRoleErrorMapsTo(ClientException stsError, ErrorCode expected)
+      throws Exception {
+    IAcsClient acsClient = mock(IAcsClient.class);
+    when(acsClient.getAcsResponse(any(AssumeRoleRequest.class))).thenThrow(stsError);
+    AliyunCredentialGenerator.StsAliyunCredentialGenerator generator =
+        new AliyunCredentialGenerator.StsAliyunCredentialGenerator(
+            acsClient, "acs:ram::123456789012:role/uc-oss");
+
+    Throwable thrown =
+        catchThrowable(
+            () -> generator.generate(context("oss://bkt/t2", Optional.empty(), Privilege.SELECT)));
+
+    assertThat(thrown).isInstanceOf(BaseException.class);
+    assertThat(((BaseException) thrown).getErrorCode()).isEqualTo(expected);
   }
 }
