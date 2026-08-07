@@ -34,7 +34,7 @@ vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + issue
 |---|---|---|
 | `UC_HOME` | 否¹ | **持久化根(云盘路径)**。默认 = `deploy` 上一级。所有状态文件都在它下面 |
 | `UC_AUTHORIZATION` | 否 | `enable`(默认,启用鉴权)/ `disable` |
-| `UC_ALLOWED_ISSUERS` | **是** | 受信任的 Relyt 实例 id,逗号分隔,如 `1024`。须与 JWKS 里各 key 的 `issuer` 一致 |
+| `UC_ALLOWED_ISSUERS` | 否 | **可选**的额外受信 issuer(逗号分隔)。受信 issuer 主要由 JWKS 文件派生(各 key 的 `issuer` 成员,热加载),此项与之取**并集**,仅用于信任**不在本地 JWKS** 的 issuer(如 OIDC discovery)。**Relyt 部署留空即可**(完全以 JWKS 为准;接入新 DWSU = 往 JWKS 追加公钥、热加载零重启、无需改此项) |
 | `UC_AUDIENCES` | **是** | subject_token 的 audience,如 `unitycatalog-server`(须与签发端 `unity.audience` 一致) |
 | `UC_ACCESS_TOKEN_TTL` | 否 | 换发 token 有效期(ISO-8601,如 `PT1H`)。**留空 = 不过期(opt-in)** |
 | `ALIYUN_REGION` | **是** | 如 `cn-hangzhou` |

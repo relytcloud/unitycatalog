@@ -41,12 +41,15 @@ public class AliyunPolicyGeneratorTest {
     assertThat(resources(objectStmt))
         .containsExactlyInAnyOrder("acs:oss:*:*:bkt/data/tbl/*", "acs:oss:*:*:bkt/data/tbl");
 
-    // List statement: ListObjects/GetBucketInfo on the BUCKET, constrained by an oss:Prefix.
+    // List statement: ListObjects/GetBucketInfo on the BUCKET, constrained by an oss:Prefix. Both
+    // the bare path (covers the reader listing the table root with prefix=<path>, no trailing
+    // slash) and <path>/* (covers everything beneath) are granted.
     JsonNode listStmt = statements.get(1);
     assertThat(actions(listStmt)).containsExactly("oss:ListObjects", "oss:GetBucketInfo");
     assertThat(resources(listStmt)).containsExactly("acs:oss:*:*:bkt");
-    JsonNode prefixes = listStmt.get("Condition").get("StringLike").get("oss:Prefix");
-    assertThat(prefixes.get(0).asText()).isEqualTo("data/tbl/*");
+    JsonNode prefixNode = listStmt.get("Condition").get("StringLike").get("oss:Prefix");
+    List<String> prefixes = MAPPER.convertValue(prefixNode, new TypeReference<>() {});
+    assertThat(prefixes).containsExactlyInAnyOrder("data/tbl", "data/tbl/*");
   }
 
   @Test

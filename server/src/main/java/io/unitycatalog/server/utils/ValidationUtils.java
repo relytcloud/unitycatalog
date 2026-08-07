@@ -26,6 +26,32 @@ public class ValidationUtils {
   }
 
   /**
+   * Validates a user email / principal. Rejects empty values and any character that would break
+   * downstream JSON/JWT handling — double quote, backslash, whitespace, and control characters. The
+   * principal ends up as the {@code sub} claim of signed subject tokens, so an unescaped quote or
+   * backslash could corrupt the token or inject claims. Intentionally not a full RFC-5322 email
+   * check: some principals (e.g. {@code uc_default_user}, {@code admin}) are not email-shaped.
+   */
+  public static void validateUserEmail(String email) {
+    if (email == null || email.trim().isEmpty()) {
+      throw new BaseException(ErrorCode.INVALID_ARGUMENT, "User email cannot be empty");
+    }
+    if (email.length() > MAX_NAME_LENGTH) {
+      throw new BaseException(
+          ErrorCode.INVALID_ARGUMENT,
+          "User email cannot be longer than " + MAX_NAME_LENGTH + " characters");
+    }
+    for (int i = 0; i < email.length(); i++) {
+      char c = email.charAt(i);
+      if (c == '"' || c == '\\' || c <= 0x20 || c == 0x7f) {
+        throw new BaseException(
+            ErrorCode.INVALID_ARGUMENT,
+            "User email cannot contain quotes, backslashes, whitespace, or control characters");
+      }
+    }
+  }
+
+  /**
    * Checks that the specified condition is true. If not, throws a BaseException with
    * INVALID_ARGUMENT error code and the specified message.
    *

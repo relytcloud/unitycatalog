@@ -9,6 +9,7 @@ import io.unitycatalog.server.persist.model.UpdateUser;
 import io.unitycatalog.server.persist.utils.PagedListingHelper;
 import io.unitycatalog.server.persist.utils.TransactionManager;
 import io.unitycatalog.server.utils.IdentityUtils;
+import io.unitycatalog.server.utils.ValidationUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -32,6 +33,7 @@ public class UserRepository {
   }
 
   public User createUser(CreateUser createUser) {
+    ValidationUtils.validateUserEmail(createUser.getEmail());
     User user =
         new User()
             .id(UUID.randomUUID().toString())

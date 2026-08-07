@@ -81,6 +81,14 @@ public class AliyunPolicyGenerator {
                       prefixes.add("*");
                       objectResources.add(String.format("acs:oss:*:*:%s/*", bucketName));
                     } else {
+                      // Grant both the bare path and path/*: a reader (e.g. the
+                      // Velox worker) opens a table by first listing the table root
+                      // with prefix=<path> (no trailing slash). Granting only
+                      // "<path>/*" makes the oss:Prefix StringLike condition reject
+                      // that list -> AccessDenied. "<path>" covers the root listing;
+                      // "<path>/*" covers everything beneath. (GetObject resources
+                      // stay scoped to the path.)
+                      prefixes.add(sanitizedPath);
                       prefixes.add(sanitizedPath + "/*");
                       objectResources.add(
                           String.format("acs:oss:*:*:%s/%s/*", bucketName, sanitizedPath));

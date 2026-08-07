@@ -12,19 +12,23 @@ import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.algorithms.Algorithm;
 import com.auth0.jwt.interfaces.Verification;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.linecorp.armeria.client.WebClient;
 import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.exception.OAuthInvalidClientException;
 import io.unitycatalog.server.exception.OAuthInvalidRequestException;
 import io.unitycatalog.server.security.SecurityContext;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -158,6 +162,41 @@ public class JwksOperations {
 
       // TODO: Or maybe just cache the provider for reuse.
       return new JwkProviderBuilder(URI.create(configJwksUri).toURL()).cached(false).build();
+    }
+  }
+
+  /**
+   * The set of issuers trusted via the hot-reloaded external JWKS file. Every JWK in the file
+   * carries an {@code "issuer"} member (see {@link IssuerScopedJwkProvider}); this returns the
+   * distinct set of those issuers. The file is read fresh on every call (no caching, matching
+   * {@link #loadJwkProvider}'s {@code .cached(false)}), so appending a new DWSU's key to the JWKS
+   * ConfigMap takes effect immediately, without restarting the server (issue #4). Returns an empty
+   * set when no external JWKS file is configured, missing, or unreadable (fail-closed).
+   */
+  public Set<String> knownIssuers() {
+    String externalJwksFile =
+        serverProperties != null ? serverProperties.getExternalJwksFile() : null;
+    if (externalJwksFile == null || externalJwksFile.isBlank()) {
+      return Set.of();
+    }
+    Path jwksPath = Path.of(externalJwksFile);
+    if (!Files.exists(jwksPath)) {
+      LOGGER.warn("Configured external JWKS file '{}' does not exist", jwksPath);
+      return Set.of();
+    }
+    try {
+      JsonNode keys = mapper.readTree(jwksPath.toFile()).path("keys");
+      Set<String> issuers = new HashSet<>();
+      for (JsonNode key : keys) {
+        String issuer = key.path("issuer").asText(null);
+        if (issuer != null && !issuer.isBlank()) {
+          issuers.add(issuer);
+        }
+      }
+      return issuers;
+    } catch (IOException e) {
+      LOGGER.warn("Failed to read external JWKS file '{}' for issuer discovery", jwksPath, e);
+      return Set.of();
     }
   }
 

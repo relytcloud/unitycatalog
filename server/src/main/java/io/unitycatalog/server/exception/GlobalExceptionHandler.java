@@ -1,5 +1,6 @@
 package io.unitycatalog.server.exception;
 
+import com.auth0.jwk.JwkException;
 import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.linecorp.armeria.common.HttpRequest;
 import com.linecorp.armeria.common.HttpResponse;
@@ -32,6 +33,19 @@ public class GlobalExceptionHandler implements ExceptionHandlerFunction {
           HttpStatus.UNAUTHORIZED,
           createErrorResponse(
               ErrorCode.UNAUTHENTICATED, "Invalid access token.", cause, new HashMap<>()));
+    } else if (cause instanceof JwkException) {
+      // JWKS lookup failures (e.g. SigningKeyNotFoundException when the JWT's kid is not present in
+      // the JWKS) are checked exceptions from com.auth0.jwk -- a sibling hierarchy of the
+      // com.auth0.jwt JWTVerificationException handled above, and not a RuntimeException. Without
+      // this branch they fall through to Armeria's default handler and surface as a bodyless HTTP
+      // 500. Map them to 401, consistent with the other token-verification failures.
+      return HttpResponse.ofJson(
+          HttpStatus.UNAUTHORIZED,
+          createErrorResponse(
+              ErrorCode.UNAUTHENTICATED,
+              "Invalid signing key: " + cause.getMessage(),
+              cause,
+              new HashMap<>()));
     } else if (cause instanceof Scim2RuntimeException) {
       ScimException scimException = (ScimException) cause.getCause();
       return HttpResponse.ofJson(
