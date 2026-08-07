@@ -24,12 +24,10 @@ const USERS = {
 
 const LIST_ROUTES = [
   { method: 'get', url: '/scim2/Users', response: USERS },
-  { method: 'get', url: '/catalogs', response: { catalogs: [] } },
-  { method: 'get', url: '/credentials', response: { credentials: [] } },
   {
     method: 'get',
-    url: '/external-locations',
-    response: { external_locations: [] },
+    url: '/catalogs',
+    response: { catalogs: [{ name: 'main' }] },
   },
 ];
 
@@ -39,7 +37,7 @@ describe('GrantPermissionModal (securable locked)', () => {
       ...LIST_ROUTES,
       {
         method: 'patch',
-        url: '/permissions/credential/cred-a',
+        url: '/permissions/metastore/metastore',
         response: { privilege_assignments: [] },
       },
     ]);
@@ -47,28 +45,28 @@ describe('GrantPermissionModal (securable locked)', () => {
       <GrantPermissionModal
         open
         closeModal={jest.fn()}
-        securableType={SecurableType.credential}
-        fullName="cred-a"
+        securableType={SecurableType.metastore}
+        fullName="metastore"
       />,
     );
 
     // Select index 0 = user, index 1 = privileges (securable is locked).
     await selectAntdOption(0, /Demo Reader/);
-    await selectAntdOption(1, 'CREATE EXTERNAL LOCATION');
+    await selectAntdOption(1, 'CREATE CATALOG');
     clickModalOk();
 
     await waitFor(() =>
       expect(
-        requestsTo('patch', '/permissions/credential/cred-a'),
+        requestsTo('patch', '/permissions/metastore/metastore'),
       ).toHaveLength(1),
     );
     expect(
-      requestsTo('patch', '/permissions/credential/cred-a')[0].data,
+      requestsTo('patch', '/permissions/metastore/metastore')[0].data,
     ).toEqual({
       changes: [
         {
           principal: 'demo.reader@x.com',
-          add: ['CREATE EXTERNAL LOCATION'],
+          add: ['CREATE CATALOG'],
           remove: [],
         },
       ],
@@ -81,8 +79,8 @@ describe('GrantPermissionModal (securable locked)', () => {
       <GrantPermissionModal
         open
         closeModal={jest.fn()}
-        securableType={SecurableType.credential}
-        fullName="cred-a"
+        securableType={SecurableType.metastore}
+        fullName="metastore"
       />,
     );
 
@@ -101,5 +99,27 @@ describe('GrantPermissionModal (securable locked)', () => {
       expect(screen.queryByText(/Demo Reader/)).toBeNull();
     });
     expect(screen.getByText(/Alice Writer/)).toBeInTheDocument();
+  });
+});
+
+describe('GrantPermissionModal (securable picker)', () => {
+  it('offers only metastore and catalogs — credential/external location grants were removed', async () => {
+    programClient(LIST_ROUTES);
+    renderWithProviders(
+      <GrantPermissionModal
+        open
+        closeModal={jest.fn()}
+        principal="demo.reader@x.com"
+      />,
+    );
+
+    // Principal locked → index 0 is the securable picker.
+    // eslint-disable-next-line testing-library/no-node-access -- antd Select renders in a body portal
+    const selectors = document.querySelectorAll('.ant-select-selector');
+    fireEvent.mouseDown(selectors[0]);
+    expect(await screen.findByText('catalog: main')).toBeInTheDocument();
+    expect(screen.getByText('metastore')).toBeInTheDocument();
+    expect(screen.queryByText(/credential:/)).toBeNull();
+    expect(screen.queryByText(/external location:/)).toBeNull();
   });
 });

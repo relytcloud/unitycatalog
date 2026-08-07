@@ -36,6 +36,7 @@ import ExternalData from './pages/ExternalData';
 import CredentialDetails from './pages/CredentialDetails';
 import ExternalLocationDetails from './pages/ExternalLocationDetails';
 import UsersList from './pages/UsersList';
+import ResizableSplit from './components/layouts/ResizableSplit';
 
 // TODO:
 // As of [19/02/2025], this implementation should be updated once the following PR are merged.
@@ -231,29 +232,31 @@ function AppProvider() {
             display: 'flex',
           }}
         >
-          {/* Left: Schema Browser */}
-          <div
-            style={{
-              width: '30%',
-              minWidth: 260,
-              maxWidth: 400,
-              borderRight: '1px solid lightgrey',
-            }}
-          >
-            <SchemaBrowser />
-          </div>
-
-          {/* Right: Main details content */}
-          <div
-            style={{
-              overflowY: 'auto',
-              flex: 1,
-              padding: 16,
-              display: 'flex',
-            }}
-          >
-            <Outlet />
-          </div>
+          {/* Draggable split: schema browser (left, fixed px) ↔ details. */}
+          <ResizableSplit
+            fixed="left"
+            defaultSize={340}
+            minSize={220}
+            maxSize={640}
+            storageKey="uc-ui-split-browser"
+            left={
+              <div style={{ overflowY: 'auto', height: '100%' }}>
+                <SchemaBrowser />
+              </div>
+            }
+            right={
+              <div
+                style={{
+                  overflowY: 'auto',
+                  flex: 1,
+                  padding: 16,
+                  display: 'flex',
+                }}
+              >
+                <Outlet />
+              </div>
+            }
+          />
         </Layout.Content>
       </Layout>
     </ConfigProvider>
