@@ -11,6 +11,8 @@ import CreateSchemaAction from '../components/schemas/CreateSchemaAction';
 import CatalogActionDropdown from '../components/catalogs/CatalogActionDropdown';
 import { EditCatalogDescriptionModal } from '../components/modals/EditCatalogDescriptionModal';
 import { useNotification } from '../utils/NotificationContext';
+import AccessPanel from '../components/access/AccessPanel';
+import { SecurableType } from '../types/api/catalog.gen';
 
 export default function CatalogDetails() {
   const { catalog } = useParams();
@@ -32,8 +34,11 @@ export default function CatalogDetails() {
               <ProductOutlined /> {catalog}
             </Typography.Title>
             <Flex gap="middle">
-              <CatalogActionDropdown catalog={catalog} />
-              <CreateSchemaAction catalog={catalog} />
+              <CatalogActionDropdown
+                catalog={catalog}
+                catalogOwner={data.owner}
+              />
+              <CreateSchemaAction catalog={catalog} catalogOwner={data.owner} />
             </Flex>
           </Flex>
         }
@@ -49,6 +54,11 @@ export default function CatalogDetails() {
               onEdit={() => setOpen(true)}
             />
             <SchemasList catalog={catalog} />
+            <AccessPanel
+              securableType={SecurableType.catalog}
+              fullName={catalog}
+              owners={[data.owner]}
+            />
           </Flex>
         </DetailsLayout.Content>
         <DetailsLayout.Aside>

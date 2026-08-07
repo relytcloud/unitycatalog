@@ -8,8 +8,6 @@ import { CredentialInterface, useGetCredential } from '../hooks/credentials';
 import { useListExternalLocations } from '../hooks/externalLocations';
 import { credentialTypeOf, maskAccessKeyId } from '../utils/credential';
 import ValidateCredentialButton from '../components/credentials/ValidateCredentialButton';
-import PermissionsPanel from '../components/permissions/PermissionsPanel';
-import { SecurableType } from '../types/api/catalog.gen';
 
 const CREDENTIAL_METADATA: MetadataListType<CredentialInterface> = [
   {
@@ -232,10 +230,6 @@ export default function CredentialDetails() {
               ]}
             />
           </div>
-          <PermissionsPanel
-            securableType={SecurableType.credential}
-            fullName={data.name ?? name}
-          />
         </Flex>
       </DetailsLayout.Content>
       <DetailsLayout.Aside>

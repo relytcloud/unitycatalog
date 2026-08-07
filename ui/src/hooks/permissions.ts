@@ -19,6 +19,42 @@ export interface PrivilegeAssignmentInterface
 
 export type PrivilegeType = Model<CatalogComponent, 'Privilege'>;
 
+/**
+ * Reduce a securable's `privilege_assignments` to ONE principal's granted
+ * privileges. The server returns every principal's assignments and ignores the
+ * `?principal` query filter, so the match must happen client-side; it is
+ * case-insensitive to align with SCIM email semantics. `principalLower` MUST
+ * already be lower-cased by the caller. Shared by every per-principal view
+ * (authz gating, per-user summary, full scan) so the matching rule can't drift.
+ */
+export function privilegesForPrincipal(
+  assignments: PrivilegeAssignmentInterface[],
+  principalLower: string,
+): PrivilegeType[] {
+  return assignments
+    .filter(
+      (assignment) =>
+        (assignment.principal ?? '').toLowerCase() === principalLower,
+    )
+    .flatMap((assignment) => assignment.privileges ?? []);
+}
+
+/**
+ * True when the assignments mention any principal OTHER than the given one.
+ * The server only returns other principals' assignments to a caller that owns
+ * the securable, an ancestor, or the metastore, so this doubles as proof of
+ * manage rights. `principalLower` MUST already be lower-cased.
+ */
+export function assignmentsMentionOtherPrincipal(
+  assignments: PrivilegeAssignmentInterface[],
+  principalLower: string,
+): boolean {
+  return assignments.some(
+    (assignment) =>
+      (assignment.principal ?? '').toLowerCase() !== principalLower,
+  );
+}
+
 export interface UseGetPermissionsArgs
   extends PathParam<
     CatalogApi,
@@ -132,6 +168,7 @@ export function useUpdatePermissions() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['getPermissions'] });
       queryClient.invalidateQueries({ queryKey: ['userPermissions'] });
+      queryClient.invalidateQueries({ queryKey: ['ownGrants'] });
     },
   });
 }
@@ -196,19 +233,13 @@ export function useUserPermissions(
             return { ...securable, privileges: [], failed: true };
           }
           // The server returns EVERY principal's assignments and ignores the
-          // ?principal filter, so filter to this user here (case-insensitive
-          // to match SCIM email semantics). Without this the drawer would
-          // attribute other users' privileges to this one.
+          // ?principal filter, so filter to this user here. Without this the
+          // drawer would attribute other users' privileges to this one.
           const assignments = response.data.privilege_assignments ?? [];
           return {
             ...securable,
             failed: false,
-            privileges: assignments
-              .filter(
-                (assignment) =>
-                  (assignment.principal ?? '').toLowerCase() === wanted,
-              )
-              .flatMap((assignment) => assignment.privileges ?? []),
+            privileges: privilegesForPrincipal(assignments, wanted),
           };
         } catch {
           return { ...securable, privileges: [], failed: true };

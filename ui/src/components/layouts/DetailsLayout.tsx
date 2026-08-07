@@ -2,6 +2,7 @@ import { Breadcrumb, Col, Flex, Grid, Row } from 'antd';
 import { BreadcrumbItemType } from 'antd/es/breadcrumb/Breadcrumb';
 import React, { ReactNode } from 'react';
 import { getChildOnType } from '../../utils/getChildOnType';
+import ResizableSplit from './ResizableSplit';
 
 interface DetailsLayoutProps {
   title: ReactNode;
@@ -18,41 +19,39 @@ function DetailsLayout({ title, breadcrumbs, children }: DetailsLayoutProps) {
   const asideChild = getChildOnType(children, Aside);
 
   return (
-    <Flex vertical gap="middle" style={{ flexGrow: 1 }}>
+    <Flex vertical gap="middle" style={{ flexGrow: 1, minWidth: 0 }}>
       <Row>
         <Col span={24}>{breadcrumbs && <Breadcrumb items={breadcrumbs} />}</Col>
         <Col span={24}>{title}</Col>
       </Row>
-      <Row
-        style={{
-          borderTop: '1px solid lightgrey',
-          flexGrow: 1,
-          flexDirection: screens.lg ? 'row' : 'column',
-        }}
-      >
-        <Col
-          xs={{ order: 2 }}
-          lg={{ order: 1, span: 16 }}
-          style={{
-            paddingTop: 16,
-            paddingRight: screens.lg ? 16 : 0,
-            flexGrow: 1,
-          }}
+      {screens.lg ? (
+        // Wide screens: content | draggable divider | fixed-width sidebar.
+        <ResizableSplit
+          fixed="right"
+          defaultSize={360}
+          minSize={240}
+          maxSize={640}
+          storageKey="uc-ui-split-details-aside"
+          style={{ borderTop: '1px solid lightgrey' }}
+          left={
+            <div style={{ paddingTop: 16, paddingRight: 12, minWidth: 0 }}>
+              {contentChild}
+            </div>
+          }
+          right={
+            <div style={{ paddingTop: 16, paddingLeft: 12 }}>{asideChild}</div>
+          }
+        />
+      ) : (
+        // Narrow screens keep the stacked layout (sidebar above content).
+        <Flex
+          vertical
+          style={{ borderTop: '1px solid lightgrey', flexGrow: 1 }}
         >
-          {contentChild}
-        </Col>
-        <Col
-          xs={{ order: 1 }}
-          lg={{ order: 2, span: 8 }}
-          style={{
-            paddingTop: 16,
-            paddingLeft: screens.lg ? 16 : 0,
-            borderLeft: screens.lg ? '1px solid lightgrey' : 'none',
-          }}
-        >
-          {asideChild}
-        </Col>
-      </Row>
+          <div style={{ paddingTop: 16 }}>{asideChild}</div>
+          <div style={{ paddingTop: 16 }}>{contentChild}</div>
+        </Flex>
+      )}
     </Flex>
   );
 }
