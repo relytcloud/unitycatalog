@@ -129,3 +129,99 @@ export function useCreateCredential() {
     },
   });
 }
+
+export interface UpdateCredentialMutationParams
+  extends RequestBody<CatalogApi, '/credentials/{name}', 'patch'> {
+  name: string;
+}
+
+export function useUpdateCredential() {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    SuccessResponseBody<CatalogApi, '/credentials/{name}', 'patch'>,
+    Error,
+    UpdateCredentialMutationParams
+  >({
+    mutationFn: async ({ name, ...body }: UpdateCredentialMutationParams) => {
+      const response = await (route as Route<CatalogApi>)({
+        client: CLIENT,
+        request: {
+          path: '/credentials/{name}',
+          method: 'patch',
+          params: {
+            paths: { name },
+            body,
+          },
+        },
+        // NOTE:
+        // Updates are authorized on the server (metastore OWNER or the
+        // credential owner); a 403 message is surfaced to the caller as-is.
+        errorMessage: 'Failed to update credential',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      } else {
+        return response.data;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['listCredentials'] });
+      queryClient.invalidateQueries({ queryKey: ['getCredential'] });
+      // Locations render the credential name they are bound to.
+      queryClient.invalidateQueries({ queryKey: ['listExternalLocations'] });
+    },
+  });
+}
+
+export interface DeleteCredentialMutationParams {
+  name: string;
+  force?: boolean;
+}
+
+export function useDeleteCredential() {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    SuccessResponseBody<CatalogApi, '/credentials/{name}', 'delete'>,
+    Error,
+    DeleteCredentialMutationParams
+  >({
+    mutationFn: async ({ name, force }: DeleteCredentialMutationParams) => {
+      const response = await (route as Route<CatalogApi>)({
+        client: CLIENT,
+        request: {
+          path: '/credentials/{name}',
+          method: 'delete',
+          params: {
+            paths: { name },
+            query: force ? { force } : undefined,
+          },
+        },
+        // NOTE:
+        // Deletion is authorized on the server (metastore OWNER or the
+        // credential owner); a 403 message is surfaced to the caller as-is.
+        errorMessage: 'Failed to delete credential',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      } else {
+        return response.data;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['listCredentials'] });
+      queryClient.invalidateQueries({ queryKey: ['listExternalLocations'] });
+      // Also drop the detail cache (like useUpdateCredential does), so a
+      // still-mounted or cached detail view for the deleted credential doesn't
+      // render stale data.
+      queryClient.invalidateQueries({ queryKey: ['getCredential'] });
+    },
+  });
+}

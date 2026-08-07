@@ -15,6 +15,9 @@ import { EditSchemaDescriptionModal } from '../components/modals/EditSchemaDescr
 import { useNotification } from '../utils/NotificationContext';
 import ModelsList from '../components/models/ModelsList';
 import CreateTableAction from '../components/tables/CreateTableAction';
+import AccessPanel from '../components/access/AccessPanel';
+import { useGetCatalog } from '../hooks/catalog';
+import { SecurableType } from '../types/api/catalog.gen';
 
 export enum SchemaTabs {
   Tables = 'Tables',
@@ -47,6 +50,9 @@ export default function SchemaDetails() {
   if (!schema) throw new Error('Schema name is required');
 
   const { data } = useGetSchema({ full_name: [catalog, schema].join('.') });
+  // The catalog's owner participates in the grant-button gating (a catalog
+  // owner may manage grants on child schemas); the server re-authorizes.
+  const { data: catalogData } = useGetCatalog({ name: catalog });
   const [open, setOpen] = useState<boolean>(false);
   const { setNotification } = useNotification();
   const mutation = useUpdateSchema({ full_name: [catalog, schema].join('.') });
@@ -64,8 +70,18 @@ export default function SchemaDetails() {
               <DatabaseOutlined /> {schemaFullName}
             </Typography.Title>
             <Flex gap="middle">
-              <CreateTableAction catalog={catalog} schema={schema} />
-              <SchemaActionsDropdown catalog={catalog} schema={schema} />
+              <CreateTableAction
+                catalog={catalog}
+                schema={schema}
+                catalogOwner={catalogData?.owner}
+                schemaOwner={data.owner}
+              />
+              <SchemaActionsDropdown
+                catalog={catalog}
+                schema={schema}
+                catalogOwner={catalogData?.owner}
+                schemaOwner={data.owner}
+              />
               {/*<CreateAssetsDropdown catalog={catalog} schema={schema} />*/}
             </Flex>
           </Flex>
@@ -89,6 +105,11 @@ export default function SchemaDetails() {
               catalog={catalog}
               schema={schema}
               tab={activeTab}
+            />
+            <AccessPanel
+              securableType={SecurableType.schema}
+              fullName={schemaFullName}
+              owners={[data.owner, catalogData?.owner]}
             />
           </Flex>
         </DetailsLayout.Content>

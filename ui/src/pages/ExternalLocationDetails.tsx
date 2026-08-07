@@ -8,8 +8,6 @@ import {
   ExternalLocationInterface,
   useGetExternalLocation,
 } from '../hooks/externalLocations';
-import PermissionsPanel from '../components/permissions/PermissionsPanel';
-import { SecurableType } from '../types/api/catalog.gen';
 
 const EXTERNAL_LOCATION_METADATA: MetadataListType<ExternalLocationInterface> =
   [
@@ -126,10 +124,6 @@ export default function ExternalLocationDetails() {
                 ),
               },
             ]}
-          />
-          <PermissionsPanel
-            securableType={SecurableType.external_location}
-            fullName={data.name ?? name}
           />
         </Flex>
       </DetailsLayout.Content>
