@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CLIENT } from '../context/client';
 import { UC_AUTH_API_PREFIX } from '../utils/constants';
@@ -67,6 +68,35 @@ export function useListScimUsers() {
       return { Resources: all, totalResults: all.length };
     },
   });
+}
+
+/**
+ * Users as antd Select options for principal pickers, searched with contains
+ * (%xx%) semantics on name AND email. The option value is the email (the
+ * grant principal), deduped so two accounts sharing an address don't produce
+ * duplicate option values.
+ */
+export function useScimUserOptions() {
+  const { data } = useListScimUsers();
+  // Memoize: rebuilding the Set + options array on every render is wasted work
+  // for a directory that only changes on a mutation (which invalidates the
+  // query and produces a fresh `data`).
+  return useMemo(() => {
+    const seen = new Set<string>();
+    return (data?.Resources ?? []).flatMap((user) => {
+      const email = (
+        user.emails?.find((candidate) => candidate.primary) ?? user.emails?.[0]
+      )?.value;
+      if (!email || seen.has(email)) return [];
+      seen.add(email);
+      return [
+        {
+          value: email,
+          label: `${user.displayName ?? email} (${email})`,
+        },
+      ];
+    });
+  }, [data]);
 }
 
 export interface CreateScimUserMutationParams

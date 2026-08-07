@@ -134,3 +134,103 @@ export function useCreateExternalLocation() {
     },
   });
 }
+
+export interface UpdateExternalLocationMutationParams
+  extends RequestBody<CatalogApi, '/external-locations/{name}', 'patch'> {
+  name: string;
+}
+
+export function useUpdateExternalLocation() {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    SuccessResponseBody<CatalogApi, '/external-locations/{name}', 'patch'>,
+    Error,
+    UpdateExternalLocationMutationParams
+  >({
+    mutationFn: async ({
+      name,
+      ...body
+    }: UpdateExternalLocationMutationParams) => {
+      const response = await (route as Route<CatalogApi>)({
+        client: CLIENT,
+        request: {
+          path: '/external-locations/{name}',
+          method: 'patch',
+          params: {
+            paths: { name },
+            body,
+          },
+        },
+        // NOTE:
+        // Updates are authorized on the server (metastore OWNER, or the
+        // location owner who can also use the new credential); a 403 message
+        // is surfaced to the caller as-is.
+        errorMessage: 'Failed to update external location',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      } else {
+        return response.data;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['listExternalLocations'] });
+      queryClient.invalidateQueries({ queryKey: ['getExternalLocation'] });
+    },
+  });
+}
+
+export interface DeleteExternalLocationMutationParams {
+  name: string;
+  force?: boolean;
+}
+
+export function useDeleteExternalLocation() {
+  const queryClient = useQueryClient();
+
+  return useMutation<
+    SuccessResponseBody<CatalogApi, '/external-locations/{name}', 'delete'>,
+    Error,
+    DeleteExternalLocationMutationParams
+  >({
+    mutationFn: async ({
+      name,
+      force,
+    }: DeleteExternalLocationMutationParams) => {
+      const response = await (route as Route<CatalogApi>)({
+        client: CLIENT,
+        request: {
+          path: '/external-locations/{name}',
+          method: 'delete',
+          params: {
+            paths: { name },
+            query: force ? { force } : undefined,
+          },
+        },
+        // NOTE:
+        // Deletion is authorized on the server (metastore OWNER or the
+        // location owner); a 403 message is surfaced to the caller as-is.
+        errorMessage: 'Failed to delete external location',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      } else {
+        return response.data;
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['listExternalLocations'] });
+      // Also drop the detail cache (like useUpdateExternalLocation does), so a
+      // still-mounted or cached detail view for the deleted location doesn't
+      // render stale data.
+      queryClient.invalidateQueries({ queryKey: ['getExternalLocation'] });
+    },
+  });
+}

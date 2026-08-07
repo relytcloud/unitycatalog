@@ -7,6 +7,7 @@ import {
   Drawer,
   Flex,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import { TeamOutlined, UserOutlined } from '@ant-design/icons';
@@ -14,6 +15,9 @@ import ListLayout from '../components/layouts/ListLayout';
 import { ScimUserInterface, useListScimUsers } from '../hooks/users';
 import { CreateUserModal } from '../components/modals/CreateUserModal';
 import UserPermissions from '../components/users/UserPermissions';
+import UserAccessDetails from '../components/users/UserAccessDetails';
+import { useAuthorized } from '../hooks/authz';
+import { SecurableType } from '../types/api/catalog.gen';
 
 // ListLayout's built-in search filters on `name`, so expose displayName there.
 interface UserRow extends ScimUserInterface {
@@ -28,7 +32,15 @@ function primaryEmailOf(user: ScimUserInterface): string {
 export default function UsersList() {
   const { data, isLoading, error } = useListScimUsers();
   const [selectedUser, setSelectedUser] = useState<UserRow | null>(null);
+  const [accessDetailsUser, setAccessDetailsUser] = useState<UserRow | null>(
+    null,
+  );
   const [createOpen, setCreateOpen] = useState(false);
+  // Server rule: only the metastore OWNER may create users; gate on the
+  // metastore owner-side signal (fail-open when identity is unknown).
+  const canCreateUser = useAuthorized([
+    { securableType: SecurableType.metastore, fullName: 'metastore' },
+  ]);
 
   const users = useMemo(
     (): UserRow[] =>
@@ -52,9 +64,21 @@ export default function UsersList() {
             <Typography.Title level={2}>
               <TeamOutlined /> Users
             </Typography.Title>
-            <Button type="primary" onClick={() => setCreateOpen(true)}>
-              Create User
-            </Button>
+            <Tooltip
+              title={
+                canCreateUser.ready && !canCreateUser.allowed
+                  ? 'Only the metastore admin may create users (server-enforced).'
+                  : undefined
+              }
+            >
+              <Button
+                type="primary"
+                disabled={!canCreateUser.allowed}
+                onClick={() => setCreateOpen(true)}
+              >
+                Create User
+              </Button>
+            </Tooltip>
           </Flex>
         }
         data={users}
@@ -106,6 +130,24 @@ export default function UsersList() {
             key: 'lastModified',
             width: '15%',
             render: (_, record) => record.meta?.lastModified ?? '',
+          },
+          {
+            title: 'Permissions',
+            key: 'permissions',
+            width: '10%',
+            render: (_, record) =>
+              primaryEmailOf(record) ? (
+                <Button
+                  size="small"
+                  onClick={(e) => {
+                    // Don't also open the user-info drawer bound to row click.
+                    e.stopPropagation();
+                    setAccessDetailsUser(record);
+                  }}
+                >
+                  Details
+                </Button>
+              ) : null,
           },
         ]}
       />
@@ -186,6 +228,14 @@ export default function UsersList() {
           </>
         )}
       </Drawer>
+      {accessDetailsUser && (
+        <UserAccessDetails
+          open={!!accessDetailsUser}
+          onClose={() => setAccessDetailsUser(null)}
+          principal={primaryEmailOf(accessDetailsUser)}
+          displayName={accessDetailsUser.displayName}
+        />
+      )}
       <CreateUserModal
         open={createOpen}
         closeModal={() => setCreateOpen(false)}
