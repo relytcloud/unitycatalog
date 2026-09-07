@@ -22,7 +22,7 @@ relyt_jwks.json、以及 **H2 元数据库**(catalog/schema/table/外部 locatio
 ```bash
 cd deploy
 cp uc.env.example uc.env      # 首次:拷贝样例
-vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + issuer/audience
+vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + audience(issuer 由 JWKS 派生,不用填)
 ./deploy-uc.sh                # 渲染配置并前台启动 UC
 # 后台:  setsid nohup ./deploy-uc.sh >/tmp/uc.log 2>&1 </dev/null & disown
 ```
@@ -92,11 +92,43 @@ UC 要求 external location 的 URL 层级**互不重叠**(相同 / 父 / 子 �
 
 > 一句话:**同一 bucket 下,credential 的粒度要么全到 db、要么全到 table,别混。**
 
+## 接入新 DWSU(在线热生效,无需重启)
+每个 DWSU(Relyt 实例)用自己的实例私钥给 JWT 签名,UC 用登记的公钥验签。接入一个新 DWSU 只需把它的公钥
+**追加进 JWKS 文件**(`UC_EXTERNAL_JWKS_FILE`,默认 `$UC_HOME/etc/conf/relyt_jwks.json`):UC 每次验签都现读该文件,
+受信 issuer 也从文件内各 key 的 `issuer` 成员实时派生 —— **改完即生效,不用重启 UC,不用改 `uc.env` / `server.properties`**。
+这一点与部署形态无关:裸进程、docker、K8s 都一样,K8s 的 ConfigMap 只是"改这个文件"的一种投递方式。
+
+三个字段必须对齐,错一个 UC 返 401:JWK 的 `issuer` == 实例 id == JWT 的 `iss`;JWK 的 `kid` == 实例签名密钥的 key id;
+`UC_AUDIENCES` == JWT 的 `aud`。
+
+1. **导出公钥**(在新 DWSU 侧):由实例签名密钥导出**公钥 JWK 条目**(单个对象,含 `kty/crv/kid/x/y` 与 `issuer`),
+   保存为 `<实例id>.jwk.json`。Relyt 运维在实例 master 上执行 `decrypt_uc_instance_key.sh <实例id>`,取输出里的 `jwks-entry`。
+   **私钥留在实例侧,不要拷出。**
+2. **登记**(在 UC 所在机器上,脚本按 `kid` 去重、可重复执行,写入为原子替换,在线请求不会读到半截文件):
+   ```bash
+   cd deploy
+   ./uc_add_jwks_key.sh <实例id>.jwk.json "$UC_EXTERNAL_JWKS_FILE" <实例id>
+   ```
+   传入完整的 `{"keys":[...]}` 会被脚本拒绝,只传那一个 JWK 对象。
+3. **验证**(在该 DWSU 上):
+   ```sql
+   SELECT * FROM relyt_get_external_schema_tables('<catalog>.<schema>');
+   ```
+   能列出表即签名、验签、UC 授权全通。UC 返 401 / `Invalid issuer` / `Token verification failed` 时,
+   核对 JWKS 条目的 `issuer` / `kid` 与该实例签名密钥的 issuer / key id 是否一致。
+
+**下线 DWSU**:从 JWKS 文件 `keys` 数组里删掉该 `kid` 的条目,同样即时生效。
+
+注意:
+- **不要**把新实例 id 加进 `UC_ALLOWED_ISSUERS`。该项是启动快照,改了要重启;且受信 issuer 已由 JWKS 派生,Relyt 场景不需要它。
+- 容器化部署时 JWKS 文件要按**目录**挂载,不要以单文件方式挂(docker 单文件 bind-mount、K8s `subPath`):
+  原子替换会换掉文件 inode,单文件挂载在容器内看不到更新。
+
 ## 安全要点
 - **`uc.env` 已被 `.gitignore` 忽略**,真实密钥不会被提交。
 - 渲染出的 `server.properties` / `hibernate.properties` 含真实值,是**运行时产物**:仓库里那两份请保持占位符,
   **不要提交渲染后的版本**(推前脱敏,或 `git update-index --skip-worktree etc/conf/server.properties`)。
 - UC 当前**明文存凭证**(代码里 `// TODO: encrypt the credential`)→ H2 文件/数据库要做**静态加密 + 严格访问控制**。
-- 登记/轮转实例公钥(脚本随本目录提供):
+- 登记/轮转实例公钥(脚本随本目录提供,完整步骤见上文「接入新 DWSU」):
   `./uc_add_jwks_key.sh <public_key.jwk.json> $UC_EXTERNAL_JWKS_FILE <issuer>`
   (第 3 参 issuer 会绑定到该 key,UC 仅给该 issuer 的 token 用它验签)。
