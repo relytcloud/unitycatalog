@@ -33,12 +33,14 @@ import type {
  *      only when the caller owns the securable, one of its ancestors, or the
  *      metastore — seeing someone else's row proves manage rights.
  *
- * Known blind spot (documented in ui/README.md): the metastore owner cannot
- * be detected through any read-only endpoint, so a metastore admin who does
- * not own a resource — in a system with no visible grants at all — sees
- * disabled buttons even though the server would authorize the call. Granting
- * any metastore-level privilege (or any grant the admin can see) restores the
- * owner-side signal.
+ *   5. Metastore admin: GET /auth/capabilities reports it outright, which
+ *      settles the case the other four signals cannot see.
+ *
+ * Signal 5 closes what used to be a documented blind spot: metastore ownership
+ * is invisible to every other read endpoint (the metastore summary carries no
+ * owner, SCIM is world-readable), so an admin looking at a resource they do not
+ * own — with no other grants visible anywhere — used to see disabled buttons
+ * even though the server would have authorized the call.
  */
 
 export interface AuthzCheck {
@@ -86,6 +88,33 @@ export function useCurrentPrincipal() {
         return email ? email.toLowerCase() : null;
       } catch {
         return null;
+      }
+    },
+  });
+}
+
+/**
+ * Whether the caller owns the metastore, straight from the server.
+ *
+ * Nothing else exposes this: it is what makes an admin's buttons light up on
+ * resources they do not personally own. Older servers lack the endpoint, so a
+ * failure is treated as "not an admin" and the remaining signals still apply.
+ */
+export function useIsMetastoreAdmin() {
+  return useQuery<boolean>({
+    queryKey: ['isMetastoreAdmin'],
+    queryFn: async () => {
+      try {
+        const response = await (route as Route<ControlApi>)({
+          client: CLIENT,
+          request: { path: '/auth/capabilities', method: 'get' },
+          config: { baseURL: UC_AUTH_API_PREFIX },
+          errorMessage: 'Failed to fetch capabilities',
+        }).call();
+        if (isError(response)) return false;
+        return !!response.data.metastore_admin;
+      } catch {
+        return false;
       }
     },
   });
@@ -139,6 +168,8 @@ async function fetchOwnGrants(
 export function useAuthorized(checks: AuthzCheck[]): AuthzResult {
   const { data: principal, isPending: principalPending } =
     useCurrentPrincipal();
+  const { data: isMetastoreAdmin, isPending: adminPending } =
+    useIsMetastoreAdmin();
   const identityKnown = !!principal;
 
   // One extra probe: any visible foreign grant on the metastore proves the
@@ -167,10 +198,13 @@ export function useAuthorized(checks: AuthzCheck[]): AuthzResult {
     })),
   });
 
-  if (principalPending) return { allowed: false, ready: false };
+  if (principalPending || adminPending) return { allowed: false, ready: false };
   // Unknown identity: the UI cannot evaluate anything — leave the buttons
   // enabled and let the server decide (it is the enforcement floor anyway).
   if (!identityKnown) return { allowed: true, ready: true };
+  // A metastore admin is authorized for everything these gates cover, without
+  // needing a grant to be visible anywhere.
+  if (isMetastoreAdmin) return { allowed: true, ready: true };
 
   const ready = grantQueries.every((query) => !query.isPending);
   if (!ready) return { allowed: false, ready: false };

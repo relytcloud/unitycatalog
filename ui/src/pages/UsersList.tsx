@@ -16,6 +16,7 @@ import { ScimUserInterface, useListScimUsers } from '../hooks/users';
 import { CreateUserModal } from '../components/modals/CreateUserModal';
 import UserPermissions from '../components/users/UserPermissions';
 import UserAccessDetails from '../components/users/UserAccessDetails';
+import UserActionsDropdown from '../components/users/UserActionsDropdown';
 import { useAuthorized } from '../hooks/authz';
 import { SecurableType } from '../types/api/catalog.gen';
 
@@ -132,22 +133,18 @@ export default function UsersList() {
             render: (_, record) => record.meta?.lastModified ?? '',
           },
           {
-            title: 'Permissions',
-            key: 'permissions',
+            title: '',
+            key: 'actions',
             width: '10%',
-            render: (_, record) =>
-              primaryEmailOf(record) ? (
-                <Button
-                  size="small"
-                  onClick={(e) => {
-                    // Don't also open the user-info drawer bound to row click.
-                    e.stopPropagation();
-                    setAccessDetailsUser(record);
-                  }}
-                >
-                  Details
-                </Button>
-              ) : null,
+            render: (_, record) => {
+              const principal = primaryEmailOf(record);
+              return principal ? (
+                <UserActionsDropdown
+                  principal={principal}
+                  onShowAccessDetails={() => setAccessDetailsUser(record)}
+                />
+              ) : null;
+            },
           },
         ]}
       />
