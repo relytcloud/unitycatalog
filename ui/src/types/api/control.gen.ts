@@ -14,14 +14,12 @@ export interface paths {
     /**
      * List users
      * @description Gets details for all the users.
-     *
      */
     get: operations['listUsers'];
     put?: never;
     /**
      * Create a user
      * @description Creates a new user.
-     *
      */
     post: operations['createUser'];
     delete?: never;
@@ -43,20 +41,17 @@ export interface paths {
     /**
      * Get a user
      * @description Gets the specified user.
-     *
      */
     get: operations['getUser'];
     /**
      * Update a user
      * @description Updates the user that matches the supplied id.
-     *
      */
     put: operations['updateUser'];
     post?: never;
     /**
      * Delete a user
      * @description Deletes the user that matches the supplied id.
-     *
      */
     delete: operations['deleteUser'];
     options?: never;
@@ -74,9 +69,31 @@ export interface paths {
     /**
      * Get the current user
      * @description Gets the user from the jwt token provided.
-     *
      */
     get: operations['getSelf'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/auth/capabilities': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Get the caller's capabilities
+     * @description Reports what the calling identity is allowed to do, for callers that cannot
+     *     infer it from other read endpoints. Metastore ownership in particular is not
+     *     exposed anywhere else, which otherwise forces a UI to guess whether an admin
+     *     may perform an action.
+     */
+    get: operations['getSelfCapabilities'];
     put?: never;
     post?: never;
     delete?: never;
@@ -97,7 +114,6 @@ export interface paths {
     /**
      * Get a token using an OAuth2 flow
      * @description Exchanges credentials for a token using the OAuth2 token exchange.
-     *
      */
     post: operations['getToken'];
     delete?: never;
@@ -118,7 +134,6 @@ export interface paths {
     /**
      * Revoke access token cookie
      * @description Revokes the access token cookie.
-     *
      */
     post: operations['logout'];
     delete?: never;
@@ -188,6 +203,13 @@ export interface components {
         lastModified?: string;
       };
     };
+    SelfCapabilities: {
+      /**
+       * @description Whether the caller owns the metastore. Metastore owners are authorized for
+       *     every securable, including ones they do not personally own.
+       */
+      metastore_admin?: boolean;
+    };
     /** @description SCIM provides a resource type for "User" resources. */
     UserResource: {
       /** @description The id of the user. */
@@ -221,48 +243,43 @@ export interface components {
     /**
      * @description Grant type identifier, from RFC 8693 Section 2.
      *     See https://datatracker.ietf.org/doc/html/rfc8693#section-2
-     *
      * @enum {string}
      */
     GrantType: GrantType;
     /**
      * @description Token type identifier, from RFC 8693 Section 3.
      *     See https://datatracker.ietf.org/doc/html/rfc8693#section-3
-     *
      * @enum {string}
      */
     TokenType: TokenType;
     /**
      * @description Access token type identifier, from RFC 8693 Section 2.
      *     See https://datatracker.ietf.org/doc/html/rfc8693#section-2
-     *
      * @enum {string}
      */
     AccessTokenType: AccessTokenType;
     /**
      * @description Authorization endpoint response type, from RFC 6749 Section 3.
      *     See https://datatracker.ietf.org/doc/html/rfc6749#section-3
-     *
      * @enum {string}
      */
     ResponseType: ResponseType;
     /**
      * @description Authorization grant type, from RFC 6749 Section 4.
      *     See https://datatracker.ietf.org/doc/html/rfc6749#section-4
-     *
      * @enum {string}
      */
     AuthorizationGrantType: AuthorizationGrantType;
     /**
      * @description The /auth/tokens endpoint supports an extension type.
      *     If ext=cookie is specified in the request query, the server will store a token in the user agent's cookie.
-     *
      * @enum {string}
      */
     TokenEndpointExtensionType: TokenEndpointExtensionType;
-    /** @description OAuth2 token exchange request form.
+    /**
+     * @description OAuth2 token exchange request form.
      *     See https://datatracker.ietf.org/doc/html/rfc8693
-     *      */
+     */
     OAuthTokenExchangeForm: {
       grant_type: components['schemas']['GrantType'];
       /** @description The authorization scope for the token exchange request. */
@@ -275,9 +292,10 @@ export interface components {
       actor_token?: string;
       actor_token_type?: components['schemas']['TokenType'];
     };
-    /** @description OAuth2 token exchange response.
+    /**
+     * @description OAuth2 token exchange response.
      *     See https://datatracker.ietf.org/doc/html/rfc8693
-     *      */
+     */
     OAuthTokenExchangeInfo: {
       /** @description The access token for the token exchange request. */
       access_token: string;
@@ -293,9 +311,10 @@ export interface components {
       /** @description The refresh token for the token exchange. */
       refresh_token?: string;
     };
-    /** @description OAuth2 authorization request form.
+    /**
+     * @description OAuth2 authorization request form.
      *     See https://datatracker.ietf.org/doc/html/rfc6749
-     *      */
+     */
     OAuthAuthorizationForm: {
       response_type: components['schemas']['ResponseType'];
       /** @description The client identifier that represents the registration information provided by the client */
@@ -307,18 +326,20 @@ export interface components {
       /** @description An opaque value used by the client to maintain state between the request and callback. */
       state?: string;
     };
-    /** @description OAuth2 authorization request.
+    /**
+     * @description OAuth2 authorization request.
      *     See https://datatracker.ietf.org/doc/html/rfc6749
-     *      */
+     */
     OAuthAuthorizationInfo: {
       /** @description The authorization code generated by the authorization server. */
       code: string;
       /** @description An opaque value used by the client to maintain state between the request and callback. */
       state?: string;
     };
-    /** @description OAuth2 access token request.
+    /**
+     * @description OAuth2 access token request.
      *     See https://datatracker.ietf.org/doc/html/rfc6749
-     *      */
+     */
     OAuthAccessTokenForm: {
       grant_type: components['schemas']['AuthorizationGrantType'];
       /** @description The authorization code received from the authorization server. */
@@ -481,10 +502,30 @@ export interface operations {
       };
     };
   };
+  getSelfCapabilities: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The capabilities were successfully retrieved. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['SelfCapabilities'];
+        };
+      };
+    };
+  };
   getToken: {
     parameters: {
       query?: {
-        /** @description Specifies the index of the first result. First item is number 1. */
+        /** @description Specifies whether the server will store a token in the user agent's cookie. */
         ext?: components['schemas']['TokenEndpointExtensionType'];
       };
       header?: never;

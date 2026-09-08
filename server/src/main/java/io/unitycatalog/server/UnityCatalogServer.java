@@ -45,6 +45,7 @@ import io.unitycatalog.server.service.PermissionService;
 import io.unitycatalog.server.service.SchemaService;
 import io.unitycatalog.server.service.Scim2SelfService;
 import io.unitycatalog.server.service.Scim2UserService;
+import io.unitycatalog.server.service.SelfCapabilitiesService;
 import io.unitycatalog.server.service.StagingTableService;
 import io.unitycatalog.server.service.TableService;
 import io.unitycatalog.server.service.TemporaryModelVersionCredentialsService;
@@ -178,6 +179,9 @@ public class UnityCatalogServer {
     PermissionService permissionService = new PermissionService(authorizer, repositories);
     Scim2UserService scim2UserService = new Scim2UserService(authorizer, repositories);
     Scim2SelfService scim2SelfService = new Scim2SelfService(authorizer, repositories);
+    SelfCapabilitiesService selfCapabilitiesService =
+        new SelfCapabilitiesService(
+            authorizer, repositories, unityCatalogServerBuilder.serverProperties);
     CatalogService catalogService = new CatalogService(authorizer, repositories);
     SchemaService schemaService = new SchemaService(authorizer, repositories);
     VolumeService volumeService = new VolumeService(authorizer, repositories);
@@ -224,6 +228,7 @@ public class UnityCatalogServer {
             scim2SelfService,
             requestConverterFunction,
             scimResponseConverterFunction)
+        .annotatedService(CONTROL_PATH + "auth/capabilities", selfCapabilitiesService)
         .annotatedService(BASE_PATH + "permissions", permissionService)
         .annotatedService(BASE_PATH + "catalogs", catalogService, requestConverterFunction)
         .annotatedService(BASE_PATH + "schemas", schemaService, requestConverterFunction)

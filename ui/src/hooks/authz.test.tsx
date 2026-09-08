@@ -146,3 +146,43 @@ describe('useAuthorized positive signals', () => {
     expect(await screen.findByText('allowed')).toBeInTheDocument();
   });
 });
+
+describe('metastore admin capability signal', () => {
+  const CAPS = '/auth/capabilities';
+
+  /**
+   * The case no other signal can see: an admin looking at a resource they do
+   * not own, with no grant visible anywhere. Before the capability endpoint
+   * this rendered a disabled button even though the server would allow it.
+   */
+  it('allows an unowned resource with no visible grants when the caller is metastore admin', async () => {
+    programClient([
+      { method: 'get', url: '/scim2/Me', response: ME },
+      { method: 'get', url: CAPS, response: { metastore_admin: true } },
+      { method: 'get', url: '/permissions/', response: EMPTY_PERMISSIONS },
+    ]);
+    renderWithProviders(<Probe checks={CATALOG_CHECK} />);
+    expect(await screen.findByText('allowed')).toBeInTheDocument();
+  });
+
+  it('still denies a non-admin with no signals', async () => {
+    programClient([
+      { method: 'get', url: '/scim2/Me', response: ME },
+      { method: 'get', url: CAPS, response: { metastore_admin: false } },
+      { method: 'get', url: '/permissions/', response: EMPTY_PERMISSIONS },
+    ]);
+    renderWithProviders(<Probe checks={CATALOG_CHECK} />);
+    expect(await screen.findByText('denied')).toBeInTheDocument();
+  });
+
+  /** Older servers have no such endpoint; the other signals must still work. */
+  it('falls back to the other signals when the endpoint is unavailable', async () => {
+    programClient([
+      { method: 'get', url: '/scim2/Me', response: ME },
+      { method: 'get', url: CAPS, response: {}, status: 404 },
+      { method: 'get', url: '/permissions/', response: EMPTY_PERMISSIONS },
+    ]);
+    renderWithProviders(<Probe checks={CATALOG_CHECK} />);
+    expect(await screen.findByText('denied')).toBeInTheDocument();
+  });
+});

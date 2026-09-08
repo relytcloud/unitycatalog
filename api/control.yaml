@@ -132,6 +132,24 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserResource'
+  /auth/capabilities:
+    get:
+      tags:
+        - OAuth2
+      operationId: getSelfCapabilities
+      summary: Get the caller's capabilities
+      description: |
+        Reports what the calling identity is allowed to do, for callers that cannot
+        infer it from other read endpoints. Metastore ownership in particular is not
+        exposed anywhere else, which otherwise forces a UI to guess whether an admin
+        may perform an action.
+      responses:
+        '200':
+          description: The capabilities were successfully retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SelfCapabilities'
   /auth/tokens:
     post:
       tags:
@@ -303,6 +321,14 @@ components:
               type: string
             lastModified:
               type: string
+    SelfCapabilities:
+      type: object
+      properties:
+        metastore_admin:
+          type: boolean
+          description: |
+            Whether the caller owns the metastore. Metastore owners are authorized for
+            every securable, including ones they do not personally own.
     UserResource:
       description: SCIM provides a resource type for "User" resources.
       type: object
