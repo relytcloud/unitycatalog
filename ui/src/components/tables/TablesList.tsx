@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { useListTables } from '../../hooks/tables';
 import { ReactNode } from 'react';
 import { TableOutlined } from '@ant-design/icons';
+import TableAccessDropdown from './TableAccessDropdown';
 
 interface TablesListProps {
   catalog: string;
@@ -51,8 +52,20 @@ export default function TablesList({
           title: 'Created At',
           dataIndex: 'created_at',
           key: 'created_at',
-          width: '40%',
+          width: '35%',
           render: (value) => formatTimestamp(value),
+        },
+        {
+          title: '',
+          key: 'actions',
+          width: '5%',
+          render: (_, record) => (
+            <TableAccessDropdown
+              catalog={record.catalog_name}
+              schema={record.schema_name}
+              table={record.name}
+            />
+          ),
         },
       ]}
     />
