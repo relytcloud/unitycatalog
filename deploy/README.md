@@ -62,6 +62,27 @@ vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + audie
   把 `hibernate.properties.template` 的 `connection.url/driver` 换成 PG/MySQL(参考仓库
   `etc/db/postgres-example.yml` / `mysql-example.yml`),并按需把连接串也参数化进 `uc.env`。
 
+### ⚠️ `etc/conf` 里还有签名身份文件,和元数据库一样必须持久化
+`etc/conf` 里混着两类文件:**可再生的渲染配置**(`server.properties` / `hibernate.properties`,丢了重跑
+`deploy-uc.sh` 即可)和**不可再生的签名身份**。后者丢一个就等于换了一套密钥:
+
+| 文件 | 行为 |
+|---|---|
+| `private_key.der` / `public_key.der` / `key_id.txt` | **三个都在才复用**;缺任意一个 → 重新生成 RSA-2048 密钥对 + 新随机 `key_id` |
+| `certs.json`(内部 JWKS)、`token.txt`(admin service token) | 每次启动按当前密钥重写 |
+
+密钥被重新生成后,**此前签发的所有 access token 与 admin service token 立即验签失败**(下游 401),而 UC
+启动时只打一行 INFO `Initializing security configuration.`,不报错、不告警 —— 症状看起来像"这次升级引入的
+bug",极易误判。
+
+所以:**`UC_HOME` 必须整体落在持久卷上,`etc/conf` 不能留在容器镜像层**。容器化部署时:
+- docker:把 `UC_HOME`(或至少 `etc/conf` + `etc/db`)按**目录**挂到宿主/云盘。
+- K8s:`etc/conf` 用 PVC 的 `subPath: conf` 挂成目录,并让它**排在** `server.properties` 等文件级 `subPath`
+  挂载**之前**(kubelet 按 `volumeMounts` 顺序挂,父目录要先挂),再用 initContainer 把镜像里的
+  `etc/conf/*` 播种进 PVC(跳过由 Secret/ConfigMap 覆盖的那几个);身份文件镜像里没有,不会被覆盖。
+- 从"没挂持久卷"的旧部署迁移:先把老容器里的 5 个身份文件备份出来放进 PVC(或 Secret),**再**升级,
+  否则升级即等于轮换密钥。
+
 ## 日志
 - UC 服务日志:**`$UC_HOME/etc/logs/server.log`**(滚动归档 `server-<时间>-<序号>.log.gz`);CLI 日志 `etc/logs/cli.log`。
   路径相对工作目录,`cd UC_HOME` 启动后即落在 `UC_HOME` 下 —— 把 `UC_HOME` 指向云盘,日志也一并持久化。
