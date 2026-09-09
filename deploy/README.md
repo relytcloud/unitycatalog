@@ -57,10 +57,24 @@ vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + audie
 ## 持久化(重启不丢)
 - UC 的**全部元数据**(catalog/schema/table、外部 location、凭证、用户、权限)存在 H2 文件库
   `$UC_DB_FILE`(默认 `$UC_HOME/etc/db/h2db.mv.db`)。
-- 把 **`UC_HOME` 指向持久卷/云盘** → 配置 + JWKS + H2 都在其下,重启/重建不丢。
+- `UC_HOME` 既是**安装根**(必须含 `bin/start-uc-server`、构建产物和依赖缓存,脚本会校验),也是**状态根**。
+  其中不可再生、必须持久化的只有 `etc/conf`(配置 + JWKS + 签名身份)和 `etc/db`(H2)。
+  ⚠️ 容器部署**只挂这两个子目录**,别把整个 `UC_HOME` 挂成卷 —— 卷会遮蔽镜像里的二进制,
+  换 tag 升级后跑的仍是卷里的旧版本。
 - ⚠️ H2 是**单进程文件库**,不支持 UC 多实例/HA。要 HA / 多实例,改用外部 **PostgreSQL/MySQL**:
   把 `hibernate.properties.template` 的 `connection.url/driver` 换成 PG/MySQL(参考仓库
   `etc/db/postgres-example.yml` / `mysql-example.yml`),并按需把连接串也参数化进 `uc.env`。
+
+### ⚠️ `etc/conf` 整个目录必须持久化
+`etc/conf` 里除了可再生的渲染配置(`server.properties` / `hibernate.properties`),还存着**不可再生的签名身份**:
+`private_key.der` / `public_key.der` / `key_id.txt`。UC **每次启动都会检查这三个文件:三个都在才复用,缺任意一个
+就当场重新生成密钥对和新的 `key_id`**(`certs.json` / `token.txt` 随之重写)—— 也就是说,只要这个目录没落在持久
+存储上,一次重启/重建就会换掉一套密钥。密钥一换,**此前签发的所有 access token 和 admin service token 立即验签
+失败**(下游 401)。
+
+### ⚠️ `etc/db` 整个目录必须持久化
+UC 的**全部元数据**(catalog/schema/table、外部 location、凭证、用户、权限)只存在 H2 文件库
+`$UC_DB_FILE`(默认 `$UC_HOME/etc/db/h2db.mv.db`)里,目录一丢就等于回到空实例,这些全得重建。
 
 ## 日志
 - UC 服务日志:**`$UC_HOME/etc/logs/server.log`**(滚动归档 `server-<时间>-<序号>.log.gz`);CLI 日志 `etc/logs/cli.log`。

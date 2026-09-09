@@ -37,11 +37,12 @@ set -a; . "$ENV_FILE"; set +a
 : "${UC_DB_FILE:=$UC_HOME/etc/db/h2db}"          # H2 metastore file (no .mv.db suffix)
 : "${UC_ACCESS_TOKEN_TTL:=}"                      # blank = no expiry (opt-in)
 : "${UC_AUTHORIZATION:=enable}"                   # enable = require auth; disable = no auth
+: "${UC_ALLOWED_ISSUERS:=}"                       # blank = trust only the issuers derived from the JWKS
 
 # Validate required values (paths are derived, so only real config/secrets are required).
 missing=0
 for v in UC_HOME ALIYUN_REGION ALIYUN_ACCESS_KEY ALIYUN_SECRET_KEY ALIYUN_MASTER_ROLE_ARN \
-         UC_ALLOWED_ISSUERS UC_AUDIENCES; do
+         UC_AUDIENCES; do
   if [ -z "${!v:-}" ]; then echo "ERROR: required variable not set: $v"; missing=1; fi
 done
 [ "$missing" -eq 0 ] || { echo "Fill the missing variables in $ENV_FILE and re-run."; exit 1; }
