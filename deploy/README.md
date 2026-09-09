@@ -72,6 +72,10 @@ vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + audie
 存储上,一次重启/重建就会换掉一套密钥。密钥一换,**此前签发的所有 access token 和 admin service token 立即验签
 失败**(下游 401)。
 
+### ⚠️ `etc/db` 整个目录必须持久化
+UC 的**全部元数据**(catalog/schema/table、外部 location、凭证、用户、权限)只存在 H2 文件库
+`$UC_DB_FILE`(默认 `$UC_HOME/etc/db/h2db.mv.db`)里,目录一丢就等于回到空实例,这些全得重建。
+
 ## 日志
 - UC 服务日志:**`$UC_HOME/etc/logs/server.log`**(滚动归档 `server-<时间>-<序号>.log.gz`);CLI 日志 `etc/logs/cli.log`。
   路径相对工作目录,`cd UC_HOME` 启动后即落在 `UC_HOME` 下 —— 把 `UC_HOME` 指向云盘,日志也一并持久化。
