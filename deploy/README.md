@@ -57,7 +57,10 @@ vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + audie
 ## 持久化(重启不丢)
 - UC 的**全部元数据**(catalog/schema/table、外部 location、凭证、用户、权限)存在 H2 文件库
   `$UC_DB_FILE`(默认 `$UC_HOME/etc/db/h2db.mv.db`)。
-- 把 **`UC_HOME` 指向持久卷/云盘** → 配置 + JWKS + H2 都在其下,重启/重建不丢。
+- `UC_HOME` 既是**安装根**(必须含 `bin/start-uc-server`、构建产物和依赖缓存,脚本会校验),也是**状态根**。
+  其中不可再生、必须持久化的只有 `etc/conf`(配置 + JWKS + 签名身份)和 `etc/db`(H2)。
+  ⚠️ 容器部署**只挂这两个子目录**,别把整个 `UC_HOME` 挂成卷 —— 卷会遮蔽镜像里的二进制,
+  换 tag 升级后跑的仍是卷里的旧版本。
 - ⚠️ H2 是**单进程文件库**,不支持 UC 多实例/HA。要 HA / 多实例,改用外部 **PostgreSQL/MySQL**:
   把 `hibernate.properties.template` 的 `connection.url/driver` 换成 PG/MySQL(参考仓库
   `etc/db/postgres-example.yml` / `mysql-example.yml`),并按需把连接串也参数化进 `uc.env`。
