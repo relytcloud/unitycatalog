@@ -38,6 +38,20 @@ Feature history of this fork, by PR merge date.
 - features: Trusted issuers hot-derived from the external JWKS file (onboard a new signer by appending its public key — no restart), plus user email validation on `createUser`.
 - bugfix: Map unknown-signing-key errors (`JwkException`) to 401 instead of a bare 500, and map Aliyun assume-role failures to 4xx by error code (e.g. `AccessDenied`) instead of a blanket 500.
 
+## 2026-09-08
+
+#10 (https://github.com/relytcloud/unitycatalog/pull/10)
+
+- features: UI — grant access straight from the table and user lists (row-level `⋯ → Grant access`, plus `Access details` for a user), backed by a read-only `auth/capabilities` endpoint so the UI knows whether the caller is a metastore admin instead of guessing.
+- bugfix: —
+
+## 2026-09-09
+
+#12 (https://github.com/relytcloud/unitycatalog/pull/12)
+
+- features: —
+- bugfix: `deploy-uc.sh` no longer refuses to start when `UC_ALLOWED_ISSUERS` is empty, which is the documented default (trusted issuers come from the external JWKS file).
+
 ## ⚠️ Known gap: UI authentication is incomplete
 
 The UI currently has no per-user login: the standalone UI server injects a single
