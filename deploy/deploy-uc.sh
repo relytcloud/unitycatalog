@@ -38,6 +38,7 @@ set -a; . "$ENV_FILE"; set +a
 : "${UC_ACCESS_TOKEN_TTL:=}"                      # blank = no expiry (opt-in)
 : "${UC_AUTHORIZATION:=enable}"                   # enable = require auth; disable = no auth
 : "${UC_ALLOWED_ISSUERS:=}"                       # blank = trust only the issuers derived from the JWKS
+: "${UC_PORT:=8088}"                              # matches bin/start-uc-with-ui.sh and the e2e suites
 
 # Validate required values (paths are derived, so only real config/secrets are required).
 missing=0
@@ -77,7 +78,17 @@ echo "Rendered:"
 echo "  server.properties    -> $UC_SERVER_PROPERTIES (contains real secrets; do not commit)"
 echo "  hibernate.properties -> $UC_HIBERNATE_PROPERTIES (H2 at $UC_DB_FILE)"
 
-# Start UC server (foreground). Pass --port etc. through.
+# Start UC server (foreground). Extra args are passed through; an explicit -p/--port in "$@" wins
+# (commons-cli keeps the FIRST occurrence, so we must not append our default after a user-supplied one).
 cd "$UC_HOME"
+port_given=0
+for a in "$@"; do
+  case "$a" in -p|--port|--port=*) port_given=1; break ;; esac
+done
 echo "Starting Unity Catalog server from $UC_HOME ..."
-exec bin/start-uc-server "$@"
+if [ "$port_given" -eq 1 ]; then
+  exec bin/start-uc-server "$@"
+else
+  echo "  listening on port $UC_PORT (override with UC_PORT or --port)"
+  exec bin/start-uc-server --port "$UC_PORT" "$@"
+fi

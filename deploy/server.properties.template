@@ -1,4 +1,4 @@
-# Rendered by deploy-uc.sh from demo/deploy/uc.env — DO NOT edit the rendered output by hand.
+# Rendered by deploy-uc.sh from deploy/uc.env — DO NOT edit the rendered output by hand.
 # Placeholders of the form dollar-brace VAR are substituted with values from uc.env.
 server.env=dev
 

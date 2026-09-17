@@ -1,148 +1,269 @@
-# UC 部署(per-user token-exchange + 阿里云 OSS)
+# UC deployment (per-user token-exchange + Aliyun OSS)
 
-一条命令把 `server.properties` 和 `hibernate.properties` **从模板渲染**出来并启动 Unity Catalog server。
-真实密钥只放在本地、gitignored 的 `uc.env` 里,**不进仓库**;仓库里只有占位符模板。
+**English** | [简体中文](README.zh-CN.md)
 
-**核心理念**:你基本只需设一个 `UC_HOME`(指向**持久化/云盘**路径)。server.properties、hibernate.properties、
-relyt_jwks.json、以及 **H2 元数据库**(catalog/schema/table/外部 location/凭证/用户/权限全在里面)都落在
-`UC_HOME` 之下 —— 重启/重建容器都不丢。
+One command renders `server.properties` and `hibernate.properties` **from templates** and starts the
+Unity Catalog server. Real secrets stay in a local, gitignored `uc.env` — **never in the repo**; the
+repo only carries placeholder templates.
 
-## 文件
-| 文件 | 是否提交 | 说明 |
-|---|---|---|
-| `server.properties.template` | ✅ | 带 `${VAR}` 占位符的 server.properties 模板 |
-| `hibernate.properties.template` | ✅ | H2 元数据库配置模板(H2 路径 = `${UC_DB_FILE}`,在 UC_HOME 下) |
-| `uc.env.example` | ✅ | 参数样例(无密钥),拷成 `uc.env` 后填写 |
-| `uc.env` | ❌ **gitignored** | **真实密钥/参数**,只在本地,绝不提交 |
-| `deploy-uc.sh` | ✅ | 渲染两个配置 + 启动 UC |
-| `uc_add_jwks_key.sh` | ✅ | 登记/轮转 Relyt 实例公钥到 JWKS 文件(校验 + 绑定 issuer) |
-| `README.md` | ✅ | 本文件 |
+**Core idea:** you normally set a single variable, `UC_HOME`, pointing at a **persistent (cloud-disk)**
+path. `server.properties`, `hibernate.properties`, `relyt_jwks.json` and the **H2 metastore DB**
+(catalogs/schemas/tables, external locations, credentials, users, permissions) all live under
+`UC_HOME`, so a restart or container rebuild loses nothing.
 
-## 用法
+> Other ways to run Unity Catalog live in [`../docker`](../docker) and [`../helm`](../helm).
+> This directory is the script-based deployment used for the Relyt integration.
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| **JDK 17+** | `deploy-uc.sh` falls back to an sbt build when the server jar is missing |
+| **Python 3** | used to substitute `${VAR}` placeholders in the templates |
+| **A persistent path** for `UC_HOME` | see [Persistence](#persistence); required in production |
+| **Aliyun RAM user + role** | a master RAM user (AK/SK) that can `AssumeRole`, plus one role per external location |
+| **Node.js 18+** and `yarn` | only if you also want the web UI — see [Running the UI](#running-the-ui) |
+
+## Quick start
+
 ```bash
 cd deploy
-cp uc.env.example uc.env      # 首次:拷贝样例
-vi uc.env                     # 填 UC_HOME(云盘路径)+ Aliyun 凭证 + audience(issuer 由 JWKS 派生,不用填)
-./deploy-uc.sh                # 渲染配置并前台启动 UC
-# 后台:  setsid nohup ./deploy-uc.sh >/tmp/uc.log 2>&1 </dev/null & disown
+cp uc.env.example uc.env      # first time only
+vi uc.env                     # set UC_HOME (persistent path) + Aliyun credentials + audience
+./deploy-uc.sh                # render config and start UC in the foreground
+# background: setsid nohup ./deploy-uc.sh >/tmp/uc.log 2>&1 </dev/null & disown
 ```
-`deploy-uc.sh` 会:校验必填项 → 渲染 `server.properties` + `hibernate.properties`(路径默认都在 `UC_HOME` 下)
-→ 建好 H2 目录 → `cd UC_HOME && bin/start-uc-server`(缺 jar 时 sbt 自动 build,需 JDK 17+)。
 
-## 需要提供的参数(uc.env)
-| 变量 | 必填 | 含义 / 示例 |
+`deploy-uc.sh` validates the required values, renders `server.properties` and
+`hibernate.properties` (all paths default to somewhere under `UC_HOME`), creates the H2 directory,
+then runs `cd $UC_HOME && bin/start-uc-server --port $UC_PORT`.
+
+### Verify it is up
+
+The server listens on **`UC_PORT` (default `8088`)**:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8088/api/2.1/unity-catalog/catalogs
+```
+
+**`401` is the expected answer** with `UC_AUTHORIZATION=enable`: the endpoint is reachable and
+authorization is on. `200` means authorization is **off** — check `UC_AUTHORIZATION`. Anything else
+(connection refused, timeout) means the server is not up; see [Troubleshooting](#troubleshooting).
+
+> `8088` matches `bin/start-uc-with-ui.sh`, the UI's default proxy target, and the phoenix/presto
+> e2e suites. Pass `--port` to `deploy-uc.sh`, or set `UC_PORT`, to use a different one — an explicit
+> `--port` wins over `UC_PORT`.
+
+## Running the UI
+
+`deploy-uc.sh` starts the **server only**. The bundled web UI is served by `ui/server.js`, which
+proxies `/api` to the UC server and injects the admin token so the browser needs no login.
+
+The container image entrypoint [`bin/start-uc-with-ui.sh`](../bin/start-uc-with-ui.sh) runs both
+processes when `UC_ENABLE_UI` is truthy (`1`/`true`/`yes`/`on`); otherwise it runs the server alone:
+
+```bash
+UC_ENABLE_UI=true UC_PORT=8088 UI_PORT=3000 bin/start-uc-with-ui.sh
+```
+
+To run the UI next to a script-based deployment, build the assets once (`ui/build` is not committed)
+and start the UI server yourself:
+
+```bash
+cd ui && yarn install && yarn build && cd ..
+UC_TARGET=http://localhost:8088 \
+UC_TOKEN_FILE="$UC_HOME/etc/conf/token.txt" \
+PORT=3000 HOST=0.0.0.0 node ui/server.js
+```
+
+> ⚠️ **The UI injects the admin token into every API call, so anyone who can reach it is a Unity
+> Catalog admin with no login.** Keep port `3000` on a trusted network; never expose it publicly.
+
+## Files
+
+| File | Committed | Purpose |
 |---|---|---|
-| `UC_HOME` | 否¹ | **持久化根(云盘路径)**。默认 = `deploy` 上一级。所有状态文件都在它下面 |
-| `UC_AUTHORIZATION` | 否 | `enable`(默认,启用鉴权)/ `disable` |
-| `UC_ALLOWED_ISSUERS` | 否 | **可选**的额外受信 issuer(逗号分隔)。受信 issuer 主要由 JWKS 文件派生(各 key 的 `issuer` 成员,热加载),此项与之取**并集**,仅用于信任**不在本地 JWKS** 的 issuer(如 OIDC discovery)。**Relyt 部署留空即可**(完全以 JWKS 为准;接入新 DWSU = 往 JWKS 追加公钥、热加载零重启、无需改此项) |
-| `UC_AUDIENCES` | **是** | subject_token 的 audience,如 `unitycatalog-server`(须与签发端 `unity.audience` 一致) |
-| `UC_ACCESS_TOKEN_TTL` | 否 | 换发 token 有效期(ISO-8601,如 `PT1H`)。**留空 = 不过期(opt-in)** |
-| `ALIYUN_REGION` | **是** | 如 `cn-hangzhou` |
-| `ALIYUN_ACCESS_KEY` | **是** | master RAM 用户 AK(用于 STS AssumeRole) |
-| `ALIYUN_SECRET_KEY` | **是** | master RAM 用户 SK |
-| `ALIYUN_MASTER_ROLE_ARN` | **是** | master RAM 主体 ARN,如 `acs:ram::<账号ID>:user/<用户名>` |
+| `server.properties.template` | ✅ | `server.properties` template with `${VAR}` placeholders |
+| `hibernate.properties.template` | ✅ | H2 metastore config template (H2 path = `${UC_DB_FILE}`, under `UC_HOME`) |
+| `uc.env.example` | ✅ | sample parameters (no secrets); copy to `uc.env` and fill in |
+| `uc.env` | ❌ **gitignored** | **real secrets/parameters**, local only, never committed |
+| `deploy-uc.sh` | ✅ | renders both configs and starts UC |
+| `uc_add_jwks_key.sh` | ✅ | registers/rotates a Relyt instance public key into the JWKS file (validates + binds issuer) |
+| `README.md` / `README.zh-CN.md` | ✅ | this document |
 
-¹ `UC_HOME` 技术上可不填(用默认仓库根),但**生产务必显式指向云盘**,否则容器重建会丢元数据。
+## Configuration (`uc.env`)
 
-### 路径覆盖(可选,一般不用填)
-都默认在 `UC_HOME` 下,只有想把某个文件单独挪走时才设:
+| Variable | Required | Meaning / example |
+|---|---|---|
+| `UC_HOME` | no¹ | **persistent root (cloud disk)**. Defaults to one level up from `deploy/`. Every stateful file lives under it |
+| `UC_PORT` | no | port the server listens on. Default `8088` |
+| `UC_AUTHORIZATION` | no | `enable` (default) / `disable` |
+| `UC_ALLOWED_ISSUERS` | no | **optional** extra trusted issuers (comma-separated). Trusted issuers are derived primarily from the JWKS file (each key's `issuer` member, hot-reloaded); this list is a **union** on top, only for issuers **not** in the local JWKS (e.g. OIDC discovery). **Leave empty for Relyt** — the JWKS alone governs trust, and onboarding a DWSU means appending a key (hot-reloaded, no restart, no change here) |
+| `UC_AUDIENCES` | **yes** | audience of the subject token, e.g. `unitycatalog-server` (must match the signer's `unity.audience`) |
+| `UC_ACCESS_TOKEN_TTL` | no | lifetime of exchanged tokens (ISO-8601, e.g. `PT1H`). A **blank** value means **no expiry**; `uc.env.example` ships `PT1H` deliberately — keep it unless you have a reason not to |
+| `ALIYUN_REGION` | **yes** | e.g. `cn-hangzhou` |
+| `ALIYUN_ACCESS_KEY` | **yes** | master RAM user AK (used for STS `AssumeRole`) |
+| `ALIYUN_SECRET_KEY` | **yes** | master RAM user SK |
+| `ALIYUN_MASTER_ROLE_ARN` | **yes** | the master RAM principal, e.g. `acs:ram::<account-id>:user/<user>`. ⚠️ Despite `ROLE` in the name this is normally the RAM **user** ARN — the identity that *calls* `AssumeRole` — **not** the per-location role that gets assumed |
 
-| 变量 | 默认 |
+¹ `UC_HOME` can technically be left unset (it falls back to the install root), but **always point it at
+a cloud disk in production**, or a container rebuild loses your metadata.
+
+### Path overrides (optional, rarely needed)
+
+Everything defaults to a location under `UC_HOME`; set these only to relocate one file:
+
+| Variable | Default |
 |---|---|
 | `UC_SERVER_PROPERTIES` | `$UC_HOME/etc/conf/server.properties` |
 | `UC_HIBERNATE_PROPERTIES` | `$UC_HOME/etc/conf/hibernate.properties` |
 | `UC_EXTERNAL_JWKS_FILE` | `$UC_HOME/etc/conf/relyt_jwks.json` |
-| `UC_DB_FILE` | `$UC_HOME/etc/db/h2db`(H2 文件,免 `.mv.db` 后缀) |
+| `UC_DB_FILE` | `$UC_HOME/etc/db/h2db` (H2 file, without the `.mv.db` suffix) |
 
-## 持久化(重启不丢)
-- UC 的**全部元数据**(catalog/schema/table、外部 location、凭证、用户、权限)存在 H2 文件库
-  `$UC_DB_FILE`(默认 `$UC_HOME/etc/db/h2db.mv.db`)。
-- `UC_HOME` 既是**安装根**(必须含 `bin/start-uc-server`、构建产物和依赖缓存,脚本会校验),也是**状态根**。
-  其中不可再生、必须持久化的只有 `etc/conf`(配置 + JWKS + 签名身份)和 `etc/db`(H2)。
-  ⚠️ 容器部署**只挂这两个子目录**,别把整个 `UC_HOME` 挂成卷 —— 卷会遮蔽镜像里的二进制,
-  换 tag 升级后跑的仍是卷里的旧版本。
-- ⚠️ H2 是**单进程文件库**,不支持 UC 多实例/HA。要 HA / 多实例,改用外部 **PostgreSQL/MySQL**:
-  把 `hibernate.properties.template` 的 `connection.url/driver` 换成 PG/MySQL(参考仓库
-  `etc/db/postgres-example.yml` / `mysql-example.yml`),并按需把连接串也参数化进 `uc.env`。
+## Persistence
 
-### ⚠️ `etc/conf` 整个目录必须持久化
-`etc/conf` 里除了可再生的渲染配置(`server.properties` / `hibernate.properties`),还存着**不可再生的签名身份**:
-`private_key.der` / `public_key.der` / `key_id.txt`。UC **每次启动都会检查这三个文件:三个都在才复用,缺任意一个
-就当场重新生成密钥对和新的 `key_id`**(`certs.json` / `token.txt` 随之重写)—— 也就是说,只要这个目录没落在持久
-存储上,一次重启/重建就会换掉一套密钥。密钥一换,**此前签发的所有 access token 和 admin service token 立即验签
-失败**(下游 401)。
+- `UC_HOME` is both the **install root** (it must contain `bin/start-uc-server`, build output and the
+  dependency cache — the script checks) and the **state root**. The parts that cannot be regenerated
+  are only `etc/conf` (config + JWKS + signing identity) and `etc/db` (H2).
+  ⚠️ In containers, **mount only those two subdirectories**. Mounting the whole `UC_HOME` as a volume
+  shadows the binaries baked into the image, so after a tag upgrade you would still run the old build.
+- ⚠️ H2 is a **single-process file database** and does not support multiple UC instances / HA. For HA,
+  switch to an external **PostgreSQL/MySQL**: replace `connection.url` / `driver` in
+  `hibernate.properties.template` (see `etc/db/postgres-example.yml` / `mysql-example.yml` in the
+  repository) and parameterise the connection string into `uc.env` as needed.
 
-### ⚠️ `etc/db` 整个目录必须持久化
-UC 的**全部元数据**(catalog/schema/table、外部 location、凭证、用户、权限)只存在 H2 文件库
-`$UC_DB_FILE`(默认 `$UC_HOME/etc/db/h2db.mv.db`)里,目录一丢就等于回到空实例,这些全得重建。
+### `etc/conf` must be persisted as a whole
 
-## 日志
-- UC 服务日志:**`$UC_HOME/etc/logs/server.log`**(滚动归档 `server-<时间>-<序号>.log.gz`);CLI 日志 `etc/logs/cli.log`。
-  路径相对工作目录,`cd UC_HOME` 启动后即落在 `UC_HOME` 下 —— 把 `UC_HOME` 指向云盘,日志也一并持久化。
-- 配置文件:**`etc/conf/server.log4j2.properties`**(log4j2)。常用滚动/级别参数:
+⚠️ Besides the regenerable rendered configs (`server.properties` / `hibernate.properties`), `etc/conf`
+holds the **non-regenerable signing identity**: `private_key.der`, `public_key.der`, `key_id.txt`.
+UC **checks these three on every start: it reuses them only if all three exist, and regenerates the
+key pair and a new `key_id` if any is missing** (`certs.json` / `token.txt` are rewritten with it).
+In other words, if this directory is not on durable storage, a single restart swaps the key set — and
+once the keys change, **every previously issued access token and admin service token fails
+verification immediately** (downstream `401`).
 
-  | 配置项 | 含义 | 默认 |
+### `etc/db` must be persisted as a whole
+
+⚠️ **All** UC metadata (catalogs/schemas/tables, external locations, credentials, users, permissions)
+lives only in the H2 file database `$UC_DB_FILE` (default `$UC_HOME/etc/db/h2db.mv.db`). Lose the
+directory and you are back to an empty instance with everything to recreate.
+
+## Logging
+
+- Server log: **`$UC_HOME/etc/logs/server.log`** (rotated to `server-<time>-<n>.log.gz`); CLI log
+  `etc/logs/cli.log`. Paths are relative to the working directory, and the script starts UC from
+  `UC_HOME`, so pointing `UC_HOME` at a cloud disk persists the logs too.
+- Config file: **`etc/conf/server.log4j2.properties`** (log4j2). Common knobs:
+
+  | Setting | Meaning | Default |
   |---|---|---|
-  | `appender.rollingFile.fileName` | 当前日志文件路径 | `etc/logs/server.log` |
-  | `appender.rollingFile.policies.size.size` | 单文件多大触发滚动 | `10MB` |
-  | `appender.rollingFile.policies.time.interval` | 按时间滚动间隔 | `1`(天) |
-  | `appender.rollingFile.strategy.max` | 保留多少个归档(超出删最旧) | `5` |
-  | `rootLogger.level` | 日志级别(trace/debug/info/warn/error) | `info` |
+  | `appender.rollingFile.fileName` | current log file | `etc/logs/server.log` |
+  | `appender.rollingFile.policies.size.size` | size that triggers rotation | `10MB` |
+  | `appender.rollingFile.policies.time.interval` | time-based rotation interval | `1` (day) |
+  | `appender.rollingFile.strategy.max` | archives to keep (oldest deleted beyond this) | `5` |
+  | `rootLogger.level` | log level (trace/debug/info/warn/error) | `info` |
 
-  改完**重启 UC 生效**(log4j2 也支持热加载,但部署里直接重启最简单)。例如要更大留存:把 `size` 调到 `50MB`、`strategy.max` 调到 `20`;排查问题临时开 `rootLogger.level = debug`。
-- `var/log/observation.log` 不是业务日志(Armeria 可观测性组件按默认建的空文件),已 gitignore,忽略即可。
+  **Restart UC to apply** (log4j2 supports hot reload, but restarting is simplest here). For more
+  retention raise `size` to `50MB` and `strategy.max` to `20`; when debugging set
+  `rootLogger.level = debug` temporarily.
+- `var/log/observation.log` is not a business log (an empty file created by default by the Armeria
+  observability component); it is gitignored and can be ignored.
 
-## 注册 storage location credential 的约束(重要)
-UC 要求 external location 的 URL 层级**互不重叠**(相同 / 父 / 子 都算重叠)。所以**同一层数据,要么统一注册到库(db)级别,要么统一到表(table)级别,不要 db 级和表级混着建**。
+## Registering storage location credentials (important)
 
-- ❌ 反例(会失败):
+UC requires external location URLs to **not overlap** in hierarchy (identical, parent or child all
+count as overlapping). So for one layer of data, register **either** at database level **or** at table
+level — do not mix the two.
+
+- ❌ Wrong (fails):
   - `oss://bucket/db`            → credential A
-  - `oss://bucket/db/table1`     → credential B  ← 与上一条父子重叠,**第二条创建直接报错**(无论先建哪条,后建的那条被拒)。
-- ✅ 正确(二选一,层级一致):
-  - 全库级:`oss://bucket/db` 一条;  ##推荐
-  - 全表级:`oss://bucket/db/table1`、`oss://bucket/db/table2` … 各一条(彼此不重叠)。
+  - `oss://bucket/db/table1`     → credential B  ← parent/child overlap with the previous one; **the
+    second create is rejected outright** (whichever is created second loses).
+- ✅ Correct (pick one, keep the level consistent):
+  - database level: a single `oss://bucket/db`;  ## recommended
+  - table level: `oss://bucket/db/table1`, `oss://bucket/db/table2`, … one each (mutually disjoint).
 
-原因:vend 时是"按数据路径找**覆盖它的那个** external location → 取其凭证里的 role 去 AssumeRole"。若 db 级和表级并存,一个表路径会被两条 location 同时覆盖,UC **无法判别该用哪份凭证(哪个 role)**——所以干脆在创建期就禁止这种重叠,混用会创建失败。
+Why: vending works by "find the external location **that covers** this data path → take the role from
+its credential → `AssumeRole`". With both a db-level and a table-level location present, one table
+path is covered by two locations and UC **cannot tell which credential (which role) to use** — so the
+overlap is rejected at creation time instead.
 
-> 一句话:**同一 bucket 下,credential 的粒度要么全到 db、要么全到 table,别混。**
+> In one sentence: **within a bucket, keep credential granularity entirely at db level or entirely at
+> table level — never mixed.**
 
-## 接入新 DWSU(在线热生效,无需重启)
-每个 DWSU(Relyt 实例)用自己的实例私钥给 JWT 签名,UC 用登记的公钥验签。接入一个新 DWSU 只需把它的公钥
-**追加进 JWKS 文件**(`UC_EXTERNAL_JWKS_FILE`,默认 `$UC_HOME/etc/conf/relyt_jwks.json`):UC 每次验签都现读该文件,
-受信 issuer 也从文件内各 key 的 `issuer` 成员实时派生 —— **改完即生效,不用重启 UC,不用改 `uc.env` / `server.properties`**。
-这一点与部署形态无关:裸进程、docker、K8s 都一样,K8s 的 ConfigMap 只是"改这个文件"的一种投递方式。
+## Onboarding a new DWSU (hot, no restart)
 
-三个字段必须对齐,错一个 UC 返 401:JWK 的 `issuer` == 实例 id == JWT 的 `iss`;JWK 的 `kid` == 实例签名密钥的 key id;
-`UC_AUDIENCES` == JWT 的 `aud`。
+Each DWSU (Relyt instance) signs its JWTs with its own instance private key, and UC verifies them with
+the registered public key. Onboarding one only takes appending its public key to the JWKS file
+(`UC_EXTERNAL_JWKS_FILE`, default `$UC_HOME/etc/conf/relyt_jwks.json`): UC re-reads that file on every
+verification, and derives trusted issuers live from each key's `issuer` member — **the change takes
+effect immediately, with no UC restart and no edit to `uc.env` / `server.properties`**. This is
+independent of deployment shape: bare process, docker and K8s behave the same; a K8s ConfigMap is just
+one way of delivering "edit this file".
 
-1. **导出公钥**(在新 DWSU 侧):由实例签名密钥导出**公钥 JWK 条目**(单个对象,含 `kty/crv/kid/x/y` 与 `issuer`),
-   保存为 `<实例id>.jwk.json`。Relyt 运维在实例 master 上执行 `decrypt_uc_instance_key.sh <实例id>`,取输出里的 `jwks-entry`。
-   **私钥留在实例侧,不要拷出。**
-2. **登记**(在 UC 所在机器上,脚本按 `kid` 去重、可重复执行,写入为原子替换,在线请求不会读到半截文件):
+Three fields must line up, or UC returns `401`: the JWK's `issuer` == instance id == the JWT's `iss`;
+the JWK's `kid` == the instance signing key's key id; `UC_AUDIENCES` == the JWT's `aud`.
+
+1. **Export the public key** (on the new DWSU): export the **public JWK entry** from the instance
+   signing key (a single object with `kty`/`crv`/`kid`/`x`/`y` plus `issuer`) and save it as
+   `<instance-id>.jwk.json`. Relyt operators run `decrypt_uc_instance_key.sh <instance-id>` on the
+   instance master and take the `jwks-entry` from its output. **The private key stays on the instance
+   — do not copy it out.**
+2. **Register** (on the UC host; the script de-duplicates by `kid`, is idempotent, and writes via an
+   atomic replace so in-flight requests never read a half-written file):
    ```bash
    cd deploy
-   ./uc_add_jwks_key.sh <实例id>.jwk.json "$UC_EXTERNAL_JWKS_FILE" <实例id>
+   ./uc_add_jwks_key.sh <instance-id>.jwk.json "$UC_EXTERNAL_JWKS_FILE" <instance-id>
    ```
-   传入完整的 `{"keys":[...]}` 会被脚本拒绝,只传那一个 JWK 对象。
-3. **验证**(在该 DWSU 上):
+   Passing a full `{"keys":[...]}` document is rejected — pass the single JWK object.
+3. **Verify** (on that DWSU):
    ```sql
    SELECT * FROM relyt_get_external_schema_tables('<catalog>.<schema>');
    ```
-   能列出表即签名、验签、UC 授权全通。UC 返 401 / `Invalid issuer` / `Token verification failed` 时,
-   核对 JWKS 条目的 `issuer` / `kid` 与该实例签名密钥的 issuer / key id 是否一致。
+   Listing the tables proves signing, verification and UC authorization all work. On `401` /
+   `Invalid issuer` / `Token verification failed`, check the JWKS entry's `issuer` / `kid` against the
+   instance signing key's issuer / key id.
 
-**下线 DWSU**:从 JWKS 文件 `keys` 数组里删掉该 `kid` 的条目,同样即时生效。
+**Offboarding a DWSU:** delete that `kid`'s entry from the JWKS `keys` array — also effective immediately.
 
-注意:
-- **不要**把新实例 id 加进 `UC_ALLOWED_ISSUERS`。该项是启动快照,改了要重启;且受信 issuer 已由 JWKS 派生,Relyt 场景不需要它。
-- 容器化部署时 JWKS 文件要按**目录**挂载,不要以单文件方式挂(docker 单文件 bind-mount、K8s `subPath`):
-  原子替换会换掉文件 inode,单文件挂载在容器内看不到更新。
+Notes:
 
-## 安全要点
-- **`uc.env` 已被 `.gitignore` 忽略**,真实密钥不会被提交。
-- 渲染出的 `server.properties` / `hibernate.properties` 含真实值,是**运行时产物**:仓库里那两份请保持占位符,
-  **不要提交渲染后的版本**(推前脱敏,或 `git update-index --skip-worktree etc/conf/server.properties`)。
-- UC 当前**明文存凭证**(代码里 `// TODO: encrypt the credential`)→ H2 文件/数据库要做**静态加密 + 严格访问控制**。
-- 登记/轮转实例公钥(脚本随本目录提供,完整步骤见上文「接入新 DWSU」):
+- **Do not** add the new instance id to `UC_ALLOWED_ISSUERS`. That setting is a startup snapshot
+  (changing it needs a restart), and trusted issuers already come from the JWKS; Relyt deployments do
+  not need it.
+- In containers, mount the JWKS file **as a directory**, not as a single file (docker single-file
+  bind-mount, K8s `subPath`): the atomic replace swaps the file inode, and a single-file mount will
+  never see the update.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `ERROR: required variable not set: X` | `X` is missing in `uc.env`; see [Configuration](#configuration-ucenv) |
+| `ERROR: env file not found` | run from `deploy/`, or `cp uc.env.example uc.env` first |
+| `ERROR: $UC_HOME/bin/start-uc-server not found` | `UC_HOME` points somewhere that is not a UC install root — it must hold the binaries as well as the state |
+| Server does not start, sbt build errors | JDK older than 17, see [Prerequisites](#prerequisites) |
+| `curl` on the port is refused / times out | the server is not up — check the console output and `$UC_HOME/etc/logs/server.log` |
+| `curl` returns `200` instead of `401` | authorization is off; set `UC_AUTHORIZATION=enable` and restart |
+| UC returns `401`, `Invalid issuer` or `Token verification failed` | the JWKS entry's `issuer`/`kid` do not match the instance, or `UC_AUDIENCES` differs from the token's `aud`; see [Onboarding a new DWSU](#onboarding-a-new-dwsu-hot-no-restart) |
+| Everything worked, then every token fails after a restart | `etc/conf` was not persisted, so the signing keys were regenerated; see [`etc/conf` must be persisted](#etcconf-must-be-persisted-as-a-whole) |
+| Creating an external location fails with an overlap error | a db-level and a table-level location overlap; see [Registering storage location credentials](#registering-storage-location-credentials-important) |
+| OSS access denied when reading a table | the role in the credential lacks `oss:ListObjects` on the bucket (with an `oss:Prefix` condition) — `oss:GetObject` alone is not enough |
+| After a tag upgrade the old build still runs | the whole `UC_HOME` is mounted as a volume, shadowing the image binaries; mount only `etc/conf` and `etc/db` |
+
+## Security notes
+
+- **`uc.env` is gitignored**, so real secrets are never committed.
+- The rendered `server.properties` / `hibernate.properties` contain real values and are **runtime
+  artifacts**: keep the copies in the repository as placeholders and **do not commit rendered
+  versions** (scrub before pushing, or
+  `git update-index --skip-worktree etc/conf/server.properties`).
+- UC currently **stores credentials in plaintext** (`// TODO: encrypt the credential` in the code) →
+  the H2 file / database needs **encryption at rest plus strict access control**.
+- The admin service token in `etc/conf/token.txt` **never expires**, and a restart writes a new one
+  without invalidating the old (the signing keys persist). Treat it as a privileged credential;
+  revoking it means rotating the keys in `etc/conf` and restarting.
+- Registering/rotating an instance public key (script provided in this directory, full steps under
+  [Onboarding a new DWSU](#onboarding-a-new-dwsu-hot-no-restart)):
   `./uc_add_jwks_key.sh <public_key.jwk.json> $UC_EXTERNAL_JWKS_FILE <issuer>`
-  (第 3 参 issuer 会绑定到该 key,UC 仅给该 issuer 的 token 用它验签)。
+  (the third argument binds the issuer to that key, so UC only uses it to verify tokens from that issuer).
