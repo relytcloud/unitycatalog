@@ -1,4 +1,4 @@
-# Rendered by deploy-uc.sh from demo/deploy/uc.env — DO NOT edit the rendered output by hand.
+# Rendered by deploy-uc.sh from deploy/uc.env — DO NOT edit the rendered output by hand.
 # UC_DB_FILE is an absolute H2 file path so the metastore DB does NOT depend on the working
 # directory; keep it under UC_HOME (a persistent/cloud-disk path) so it survives restarts.
 hibernate.connection.driver_class=org.h2.Driver
