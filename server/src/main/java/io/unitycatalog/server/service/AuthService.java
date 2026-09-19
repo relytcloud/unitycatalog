@@ -4,6 +4,7 @@ import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.exceptions.JWTDecodeException;
 import com.auth0.jwt.exceptions.JWTVerificationException;
+import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.linecorp.armeria.common.AggregatedHttpRequest;
@@ -245,15 +246,16 @@ public class AuthService {
   }
 
   private void verifyPrincipal(DecodedJWT decodedJWT) {
+    Claim emailClaim = decodedJWT.getClaim(JwtClaim.EMAIL.key());
+    boolean hasEmail = !emailClaim.isMissing() && !emailClaim.isNull();
+    // The fallback to "sub" is retained: DWSU tokens legitimately rely on it. Only the error is
+    // split, so a missing optional claim stops looking like a rejected user.
     String subject =
-        decodedJWT
-            .getClaims()
-            .getOrDefault(JwtClaim.EMAIL.key(), decodedJWT.getClaim(JwtClaim.SUBJECT.key()))
-            .asString();
+        hasEmail ? emailClaim.asString() : decodedJWT.getClaim(JwtClaim.SUBJECT.key()).asString();
 
     LOGGER.debug("Validating principal: {}", subject);
 
-    if (subject.equals("admin")) {
+    if ("admin".equals(subject)) {
       LOGGER.debug("admin always allowed");
       return;
     }
@@ -268,8 +270,16 @@ public class AuthService {
       // IGNORE
     }
 
+    if (!hasEmail) {
+      throw new OAuthInvalidRequestException(
+          ErrorCode.INVALID_ARGUMENT,
+          "The subject token has no 'email' claim, so the principal fell back to 'sub'. For a "
+              + "Microsoft Entra ID token, add 'email' as an optional claim on the app "
+              + "registration so the token carries the address the user is provisioned under.");
+    }
+
     throw new OAuthInvalidRequestException(
-        ErrorCode.INVALID_ARGUMENT, "User not allowed: " + subject);
+        ErrorCode.INVALID_ARGUMENT, "User not provisioned: " + subject);
   }
 
   private Cookie createCookie(String key, String value, String path, String maxAge) {
