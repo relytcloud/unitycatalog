@@ -58,7 +58,7 @@ public class JwksOperations {
   /** How long a resolved jwks_uri is reused before the discovery document is re-read. */
   private static final Duration DISCOVERY_TTL = Duration.ofHours(24);
 
-  private record CachedDiscovery(String jwksUri, Instant fetchedAt) {}
+  private record CachedDiscovery(String jwksUri, JwkProvider provider, Instant fetchedAt) {}
 
   private final Map<String, CachedDiscovery> discoveryCache = new ConcurrentHashMap<>();
 
@@ -148,20 +148,21 @@ public class JwksOperations {
 
       LOGGER.debug("Issuer '{}': resolving keys by OIDC discovery", issuer);
 
-      CachedDiscovery cached = discoveryCache.get(issuer);
+      String normalizedIssuer =
+          issuer.startsWith("https://") || issuer.startsWith("http://")
+              ? issuer
+              : "https://" + issuer;
+
+      CachedDiscovery cached = discoveryCache.get(normalizedIssuer);
       if (cached != null
           && Duration.between(cached.fetchedAt(), Instant.now()).compareTo(DISCOVERY_TTL) < 0) {
-        return remoteProvider(cached.jwksUri());
+        return cached.provider();
       }
 
       // Get the JWKS from the OIDC well-known location described here
       // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
 
-      if (!issuer.startsWith("https://") && !issuer.startsWith("http://")) {
-        issuer = "https://" + issuer;
-      }
-
-      String wellKnownConfigUrl = issuer;
+      String wellKnownConfigUrl = normalizedIssuer;
 
       if (!wellKnownConfigUrl.endsWith("/")) {
         wellKnownConfigUrl += "/";
@@ -177,11 +178,11 @@ public class JwksOperations {
         if (e.getCause() instanceof ResponseTimeoutException) {
           throw new OAuthInvalidRequestException(
               ErrorCode.DEADLINE_EXCEEDED,
-              "Timed out fetching the OIDC configuration for issuer " + issuer);
+              "Timed out fetching the OIDC configuration for issuer " + normalizedIssuer);
         }
         throw new OAuthInvalidRequestException(
             ErrorCode.UNAVAILABLE,
-            "Could not reach the identity provider for issuer " + issuer,
+            "Could not reach the identity provider for issuer " + normalizedIssuer,
             e);
       }
 
@@ -190,7 +191,7 @@ public class JwksOperations {
             ErrorCode.UNAVAILABLE,
             String.format(
                 "Identity provider returned HTTP %d for the OIDC configuration of issuer %s",
-                discoveryResponse.status().code(), issuer));
+                discoveryResponse.status().code(), normalizedIssuer));
       }
 
       String response = discoveryResponse.contentUtf8();
@@ -206,7 +207,7 @@ public class JwksOperations {
       String configIssuer = (String) configMap.get("issuer");
       String configJwksUri = (String) configMap.get("jwks_uri");
 
-      if (!configIssuer.equals(issuer)) {
+      if (!configIssuer.equals(normalizedIssuer)) {
         throw new OAuthInvalidRequestException(ErrorCode.ABORTED,
             "Issuer doesn't match configuration");
       }
@@ -215,8 +216,10 @@ public class JwksOperations {
         throw new OAuthInvalidRequestException(ErrorCode.ABORTED, "JWKS configuration missing");
       }
 
-      discoveryCache.put(issuer, new CachedDiscovery(configJwksUri, Instant.now()));
-      return remoteProvider(configJwksUri);
+      JwkProvider provider = remoteProvider(configJwksUri);
+      discoveryCache.put(
+          normalizedIssuer, new CachedDiscovery(configJwksUri, provider, Instant.now()));
+      return provider;
     }
   }
 

@@ -177,6 +177,7 @@ public class JwksOperationsTest {
       ops.loadJwkProvider(idp.issuer()).get("kidRemote");
 
       assertThat(idp.discoveryHits()).isEqualTo(1);
+      assertThat(idp.jwksHits()).isEqualTo(1);
     }
   }
 
