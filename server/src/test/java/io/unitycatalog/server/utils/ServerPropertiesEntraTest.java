@@ -81,6 +81,36 @@ public class ServerPropertiesEntraTest {
   }
 
   @Test
+  public void derivedTrustListsStayNullTolerant() throws Exception {
+    // A subject token with no 'iss' claim decodes to a null issuer, and AuthService consults the
+    // allow-list with it. List.copyOf(...).contains(null) throws NullPointerException where the
+    // configured list's returns false, so appending a derived value must not change that: an
+    // unauthenticated caller is the one who decides whether this lookup happens with a null, and
+    // the answer has to be a 401, not a 500.
+    ServerProperties props =
+        propertiesWith(
+            "server.entra.tenant-id=" + TENANT,
+            "server.client-id=entra-client-id",
+            "server.allowed-issuers=https://existing-issuer",
+            "server.audiences=existing-audience");
+
+    assertThat(props.getAllowedIssuers().contains(null)).isFalse();
+    assertThat(props.getAudiences().contains(null)).isFalse();
+  }
+
+  @Test
+  public void onlyEntraIssuersAreRecognisedAsEntra() throws Exception {
+    ServerProperties props = propertiesWith("server.entra.tenant-id=" + TENANT);
+
+    assertThat(props.isEntraIssuer(ENTRA_ISSUER)).isTrue();
+    // A different tenant is still Entra: an operator may trust it via server.allowed-issuers
+    // alone, without setting a tenant id.
+    assertThat(props.isEntraIssuer("https://login.microsoftonline.com/other-tenant/v2.0")).isTrue();
+    assertThat(props.isEntraIssuer("relyt-instance-known")).isFalse();
+    assertThat(props.isEntraIssuer(null)).isFalse();
+  }
+
+  @Test
   public void blankTenantIsTreatedAsUnset() throws Exception {
     ServerProperties props =
         propertiesWith("server.entra.tenant-id=", "server.client-id=some-client-id");

@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -556,9 +557,31 @@ public class ServerProperties {
   }
 
   /**
+   * Whether an issuer identifies Microsoft Entra ID: either the issuer derived from {@code
+   * server.entra.tenant-id}, or any issuer under the Entra authority, since an operator may instead
+   * have listed the issuer in {@code server.allowed-issuers} without setting a tenant id.
+   *
+   * <p>This only decides whether Entra-specific advice belongs in an error message. It grants no
+   * trust of its own: the allow-list check is what admits an issuer.
+   */
+  public boolean isEntraIssuer(String issuer) {
+    if (issuer == null || issuer.isBlank()) {
+      return false;
+    }
+    return issuer.equals(getEntraIssuer()) || issuer.startsWith(ENTRA_AUTHORITY + "/");
+  }
+
+  /**
    * Union a configured list with a derived value. The derived value is appended only when it is
    * present and not already configured, so derivation composes with explicit configuration rather
    * than replacing it.
+   *
+   * <p>The result must stay null-TOLERANT. Callers test membership of a value taken straight from a
+   * token claim, which may legitimately be null, and {@code List.copyOf(...).contains(null)} throws
+   * NullPointerException where {@code Stream.toList().contains(null)} -- what {@link
+   * #getCommaSeparatedList} returns, and what these lists were before anything was derived into
+   * them -- simply returns false. Adding a derived value must not change that: an unauthenticated
+   * caller can decide whether the list is consulted with a null.
    */
   private static List<String> unionWithDerived(List<String> configured, String derived) {
     if (derived == null || derived.isBlank() || configured.contains(derived)) {
@@ -566,7 +589,7 @@ public class ServerProperties {
     }
     List<String> combined = new ArrayList<>(configured);
     combined.add(derived);
-    return List.copyOf(combined);
+    return Collections.unmodifiableList(combined);
   }
 
   /**
