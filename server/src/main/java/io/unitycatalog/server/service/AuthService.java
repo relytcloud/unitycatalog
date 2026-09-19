@@ -4,7 +4,6 @@ import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.exceptions.JWTDecodeException;
 import com.auth0.jwt.exceptions.JWTVerificationException;
-import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.linecorp.armeria.common.AggregatedHttpRequest;
@@ -37,7 +36,6 @@ import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.exception.OAuthInvalidRequestException;
 import io.unitycatalog.server.persist.Repositories;
 import io.unitycatalog.server.persist.UserRepository;
-import io.unitycatalog.server.security.JwtClaim;
 import io.unitycatalog.server.security.SecurityContext;
 import io.unitycatalog.server.utils.JwksOperations;
 import io.unitycatalog.server.utils.ServerProperties;
@@ -174,6 +172,16 @@ public class AuthService {
 
     String issuer = decodedJWT.getIssuer();
 
+    // A subject token with no 'iss' claim names no issuer, so it is untrusted for the same reason
+    // an unrecognised one is, and gets the same 401. Rejecting it here also keeps a null out of
+    // the allow-list lookup below: an immutable list's contains(null) throws NullPointerException,
+    // which matched no GlobalExceptionHandler branch and turned this 401 into a bodyless 500 that
+    // any unauthenticated caller could trigger.
+    if (issuer == null || issuer.isBlank()) {
+      LOGGER.debug("Token rejected: no issuer claim");
+      throw new OAuthInvalidRequestException(ErrorCode.UNAUTHENTICATED, "Invalid issuer");
+    }
+
     // Validate issuer BEFORE fetching JWKS: trusted if present in the JWKS-derived set OR the
     // configured allow-list (union).
     if (!knownIssuers.contains(issuer) && !allowedIssuers.contains(issuer)) {
@@ -246,12 +254,17 @@ public class AuthService {
   }
 
   private void verifyPrincipal(DecodedJWT decodedJWT) {
-    Claim emailClaim = decodedJWT.getClaim(JwtClaim.EMAIL.key());
-    boolean hasEmail = !emailClaim.isMissing() && !emailClaim.isNull();
-    // The fallback to "sub" is retained: DWSU tokens legitimately rely on it. Only the error is
-    // split, so a missing optional claim stops looking like a rejected user.
-    String subject =
-        hasEmail ? emailClaim.asString() : decodedJWT.getClaim(JwtClaim.SUBJECT.key()).asString();
+    // Usability, not presence: an "email" claim that is JSON null, or a number/array/object rather
+    // than a string, is present but names no one, and asString() quietly returns null for all of
+    // them. Testing presence made the principal null for such a token and skipped the 'sub'
+    // fallback, rejecting a token whose 'sub' was perfectly well provisioned.
+    //
+    // The fallback to "sub" is retained: DWSU tokens legitimately rely on it. SecurityContext
+    // resolves the subject by this same rule when it mints the access token, so what is admitted
+    // here and what is stamped there cannot diverge.
+    String email = SecurityContext.usableEmail(decodedJWT);
+    boolean hasEmail = email != null;
+    String subject = SecurityContext.resolvePrincipalSubject(decodedJWT);
 
     LOGGER.debug("Validating principal: {}", subject);
 
@@ -270,12 +283,20 @@ public class AuthService {
       // IGNORE
     }
 
-    if (!hasEmail) {
+    // Entra's 'sub' is an opaque per-application GUID that nobody provisions a user under, so for
+    // an Entra token the actionable advice is to add 'email' to the app registration. That advice
+    // is gated on the token actually coming from Entra: falling back to 'sub' is how DWSU
+    // token-exchange is designed to work, and those operators need the plain message. Every branch
+    // names the subject, because that is the principal the operator has to create.
+    if (!hasEmail && serverProperties.isEntraIssuer(decodedJWT.getIssuer())) {
       throw new OAuthInvalidRequestException(
           ErrorCode.INVALID_ARGUMENT,
-          "The subject token has no 'email' claim, so the principal fell back to 'sub'. For a "
-              + "Microsoft Entra ID token, add 'email' as an optional claim on the app "
-              + "registration so the token carries the address the user is provisioned under.");
+          "User not provisioned: "
+              + subject
+              + ". The subject token has no usable 'email' claim, so the principal fell back to"
+              + " 'sub'. For a Microsoft Entra ID token, add 'email' as an optional claim on the"
+              + " app registration so the token carries the address the user is provisioned"
+              + " under.");
     }
 
     throw new OAuthInvalidRequestException(
