@@ -40,9 +40,9 @@ import org.slf4j.LoggerFactory;
 public class JwksOperations {
 
   /**
-   * Timeout for reaching a remote identity provider. Applies to the discovery document here and,
-   * via {@code JwkProviderBuilder.timeouts}, to the JWKS fetch. Without it a slow IdP blocks the
-   * calling thread indefinitely.
+   * Bounds the discovery-document fetch here. Intended to bound the JWKS fetch too, via {@code
+   * JwkProviderBuilder.timeouts}, once that is wired up (tracked separately). Without it a slow
+   * IdP blocks the calling thread indefinitely.
    */
   private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(5);
 
