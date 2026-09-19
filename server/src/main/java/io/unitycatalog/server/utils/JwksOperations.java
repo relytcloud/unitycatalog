@@ -28,11 +28,14 @@ import java.nio.file.Path;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,11 +43,24 @@ import org.slf4j.LoggerFactory;
 public class JwksOperations {
 
   /**
-   * Bounds the discovery-document fetch here. Intended to bound the JWKS fetch too, via {@code
-   * JwkProviderBuilder.timeouts}, once that is wired up (tracked separately). Without it a slow
-   * IdP blocks the calling thread indefinitely.
+   * Bounds both the discovery-document fetch here and the JWKS fetch, via {@code
+   * JwkProviderBuilder.timeouts} in {@link #remoteProvider}. Without it a slow IdP blocks the
+   * calling thread indefinitely.
    */
   private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(5);
+
+  /** Remote key cache: entries and lifetime. A cache miss on an unknown kid still triggers a
+   * fetch, which is what lets key rotation work; the rate limit is what stops that being abused. */
+  private static final long KEY_CACHE_SIZE = 10;
+  private static final long KEY_CACHE_TTL_HOURS = 24;
+  private static final long RATE_LIMIT_BUCKET = 10;
+  private static final long RATE_LIMIT_PER_MINUTE = 10;
+  /** How long a resolved jwks_uri is reused before the discovery document is re-read. */
+  private static final Duration DISCOVERY_TTL = Duration.ofHours(24);
+
+  private record CachedDiscovery(String jwksUri, Instant fetchedAt) {}
+
+  private final Map<String, CachedDiscovery> discoveryCache = new ConcurrentHashMap<>();
 
   private final WebClient webClient = WebClient.builder().responseTimeout(HTTP_TIMEOUT).build();
   private static final ObjectMapper mapper = new ObjectMapper();
@@ -132,6 +148,12 @@ public class JwksOperations {
 
       LOGGER.debug("Issuer '{}': resolving keys by OIDC discovery", issuer);
 
+      CachedDiscovery cached = discoveryCache.get(issuer);
+      if (cached != null
+          && Duration.between(cached.fetchedAt(), Instant.now()).compareTo(DISCOVERY_TTL) < 0) {
+        return remoteProvider(cached.jwksUri());
+      }
+
       // Get the JWKS from the OIDC well-known location described here
       // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
 
@@ -193,9 +215,25 @@ public class JwksOperations {
         throw new OAuthInvalidRequestException(ErrorCode.ABORTED, "JWKS configuration missing");
       }
 
-      // TODO: Or maybe just cache the provider for reuse.
-      return new JwkProviderBuilder(URI.create(configJwksUri).toURL()).cached(false).build();
+      discoveryCache.put(issuer, new CachedDiscovery(configJwksUri, Instant.now()));
+      return remoteProvider(configJwksUri);
     }
+  }
+
+  /**
+   * A provider for a remote JWKS endpoint. Unlike the static file — which stays uncached so a
+   * newly appended DWSU key takes effect without a restart — a remote provider is cached, rate
+   * limited and given explicit timeouts, because it is a network dependency on every token
+   * exchange.
+   */
+  @SneakyThrows
+  private JwkProvider remoteProvider(String jwksUri) {
+    int timeoutMillis = (int) HTTP_TIMEOUT.toMillis();
+    return new JwkProviderBuilder(URI.create(jwksUri).toURL())
+        .cached(KEY_CACHE_SIZE, KEY_CACHE_TTL_HOURS, TimeUnit.HOURS)
+        .rateLimited(RATE_LIMIT_BUCKET, RATE_LIMIT_PER_MINUTE, TimeUnit.MINUTES)
+        .timeouts(timeoutMillis, timeoutMillis)
+        .build();
   }
 
   /**

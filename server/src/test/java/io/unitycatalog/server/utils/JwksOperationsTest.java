@@ -166,6 +166,21 @@ public class JwksOperationsTest {
   }
 
   @Test
+  public void discoveryDocumentIsFetchedOncePerIssuer() throws Exception {
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + entry("kidRemote", X_B, Y_B, null) + "]}")) {
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      ops.loadJwkProvider(idp.issuer()).get("kidRemote");
+      ops.loadJwkProvider(idp.issuer()).get("kidRemote");
+      ops.loadJwkProvider(idp.issuer()).get("kidRemote");
+
+      assertThat(idp.discoveryHits()).isEqualTo(1);
+    }
+  }
+
+  @Test
   public void knownIssuersReturnsDistinctIssuersAcrossKeys() throws Exception {
     // Two issuers, and a second key for issuer-a: the result is the deduplicated set of issuers.
     String jwks =
