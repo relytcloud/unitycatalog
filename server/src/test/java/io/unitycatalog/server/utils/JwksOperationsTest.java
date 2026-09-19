@@ -16,6 +16,14 @@ import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -212,6 +220,94 @@ public class JwksOperationsTest {
       assertThat(idp.discoveryHits()).isEqualTo(1);
       assertThat(idp.jwksHits()).isEqualTo(1);
     }
+  }
+
+  @Test
+  public void concurrentColdStartCallersShareASingleDiscoveryFetch() throws Exception {
+    // A cold cache plus N concurrent token exchanges used to mean N discovery fetches, each
+    // pinning an Armeria blocking thread for up to the 5-second timeout. That is the cold start,
+    // and -- because a failed discovery is deliberately never cached -- it is also every request
+    // for the whole duration of an identity-provider outage.
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + entry("kidRemote", X_B, Y_B, null) + "]}")) {
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+      CountDownLatch firstFetchArrived = new CountDownLatch(1);
+      CompletableFuture<Void> releaseDiscovery = idp.gateDiscoveryOn(firstFetchArrived);
+
+      int callers = 8;
+      ExecutorService pool = Executors.newFixedThreadPool(callers);
+      List<Future<JwkProvider>> results = new ArrayList<>();
+      try {
+        // The first caller's request reaches the (now blocked) IdP before any other caller
+        // starts, so the fetch is provably in flight rather than merely likely to be: no sleep,
+        // and no dependence on how the threads happen to be scheduled.
+        results.add(pool.submit(() -> ops.loadJwkProvider(idp.issuer())));
+        assertThat(firstFetchArrived.await(30, TimeUnit.SECONDS)).isTrue();
+        for (int i = 1; i < callers; i++) {
+          results.add(pool.submit(() -> ops.loadJwkProvider(idp.issuer())));
+        }
+        releaseDiscovery.complete(null);
+
+        for (Future<JwkProvider> result : results) {
+          assertThat(result.get(30, TimeUnit.SECONDS).get("kidRemote").getId())
+              .isEqualTo("kidRemote");
+        }
+      } finally {
+        pool.shutdownNow();
+      }
+
+      // Every caller either performed the one fetch or took its result: whether a peer waited on
+      // the lock or arrived after the cache was populated, the fetch count is the same.
+      assertThat(idp.discoveryHits()).isEqualTo(1);
+      assertThat(idp.jwksHits()).isEqualTo(1);
+    }
+  }
+
+  @Test
+  public void failedDiscoveryIsRetriedRatherThanCached() throws Exception {
+    // Failures must never be cached: /tokens is unauthenticated, so negative caching would let
+    // anyone turn a momentary upstream blip into a local outage lasting DISCOVERY_TTL. The
+    // single-flight lock must not become a negative cache either -- it is released with nothing
+    // written, so the next request retries.
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + entry("kidRemote", X_B, Y_B, null) + "]}")) {
+      idp.failDiscoveryWith(HttpStatus.SERVICE_UNAVAILABLE);
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+
+      idp.failDiscoveryWith(HttpStatus.OK);
+
+      assertThat(ops.loadJwkProvider(idp.issuer()).get("kidRemote").getId()).isEqualTo("kidRemote");
+      assertThat(idp.discoveryHits()).isEqualTo(2);
+    }
+  }
+
+  @Test
+  public void theLogCooldownAllowsOneLinePerKeyPerWindow() {
+    // What keeps an outage to one WARN per issuer per minute instead of one per token exchange.
+    JwksOperations.LogCooldown cooldown = new JwksOperations.LogCooldown(Duration.ofMinutes(1));
+
+    assertThat(cooldown.allow("issuer-a")).isTrue();
+    assertThat(cooldown.allow("issuer-a")).isFalse();
+    // Per issuer: one provider's outage must not silence another provider's first failure.
+    assertThat(cooldown.allow("issuer-b")).isTrue();
+  }
+
+  @Test
+  public void theLogCooldownIsAWindowNotAOneShot() {
+    // A zero-length window is the boundary case of "the cooldown has elapsed". Getting this
+    // wrong would silence an issuer permanently after its first failure, which is worse than the
+    // storm the throttle exists to stop. Expressed as zero rather than a sleep so it cannot flake.
+    JwksOperations.LogCooldown cooldown = new JwksOperations.LogCooldown(Duration.ZERO);
+
+    assertThat(cooldown.allow("issuer-a")).isTrue();
+    assertThat(cooldown.allow("issuer-a")).isTrue();
   }
 
   @Test
@@ -412,5 +508,60 @@ public class JwksOperationsTest {
     JwksOperations ops = new JwksOperations(mock(SecurityContext.class), serverProperties);
 
     assertThat(ops.knownIssuers()).isEmpty();
+  }
+
+  private static final String ENTRA_ISSUER =
+      "https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0";
+
+  /** Operations with both a static JWKS file and a configured Entra tenant. */
+  private static JwksOperations opsWith(String externalJwksFile, String entraIssuer) {
+    ServerProperties serverProperties = mock(ServerProperties.class);
+    when(serverProperties.getExternalJwksFile()).thenReturn(externalJwksFile);
+    when(serverProperties.getEntraIssuer()).thenReturn(entraIssuer);
+    return new JwksOperations(mock(SecurityContext.class), serverProperties);
+  }
+
+  @Test
+  public void discoveryFallthroughIsNotWarnedAboutForTheConfiguredEntraIssuer() {
+    // Entra's keys rotate and cannot live in the hand-maintained file, so discovery is its only
+    // path. Warning on it in every mixed deployment is what teaches an operator to ignore the
+    // line that is there to catch a typo'd "issuer" member.
+    JwksOperations ops = opsWith("/etc/conf/relyt_jwks.json", ENTRA_ISSUER);
+
+    assertThat(ops.shouldWarnOnDiscoveryFallthrough(ENTRA_ISSUER, "/etc/conf/relyt_jwks.json"))
+        .isFalse();
+  }
+
+  @Test
+  public void discoveryFallthroughIsStillWarnedAboutForEveryOtherIssuer() {
+    // The case the warning exists for: an issuer that was meant to be file-held.
+    JwksOperations ops = opsWith("/etc/conf/relyt_jwks.json", ENTRA_ISSUER);
+
+    assertThat(ops.shouldWarnOnDiscoveryFallthrough("https://dwsu.example", "/etc/conf/x.json"))
+        .isTrue();
+    // Another tenant under the same authority is not the configured one, so it is not expected.
+    assertThat(
+            ops.shouldWarnOnDiscoveryFallthrough(
+                "https://login.microsoftonline.com/some-other-tenant/v2.0", "/etc/conf/x.json"))
+        .isTrue();
+  }
+
+  @Test
+  public void discoveryFallthroughIsNotWarnedAboutWithoutAJwksFile() {
+    JwksOperations ops = opsWith(null, ENTRA_ISSUER);
+
+    assertThat(ops.shouldWarnOnDiscoveryFallthrough("https://dwsu.example", null)).isFalse();
+    assertThat(ops.shouldWarnOnDiscoveryFallthrough("https://dwsu.example", "  ")).isFalse();
+  }
+
+  @Test
+  public void discoveryFallthroughRuleToleratesAbsentServerProperties() {
+    // The single-argument constructor passes a null ServerProperties, so the Entra comparison
+    // must not reach for it. Reached in practice wherever JwksOperations is built for INTERNAL.
+    JwksOperations ops = new JwksOperations(mock(SecurityContext.class));
+
+    assertThat(ops.shouldWarnOnDiscoveryFallthrough("https://dwsu.example", "/etc/conf/x.json"))
+        .isTrue();
+    assertThat(ops.shouldWarnOnDiscoveryFallthrough(ENTRA_ISSUER, null)).isFalse();
   }
 }

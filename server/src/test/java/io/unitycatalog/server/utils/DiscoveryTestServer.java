@@ -5,6 +5,8 @@ import com.linecorp.armeria.common.HttpStatus;
 import com.linecorp.armeria.common.MediaType;
 import com.linecorp.armeria.server.Server;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -25,6 +27,8 @@ public final class DiscoveryTestServer implements AutoCloseable {
   private volatile HttpStatus discoveryStatus = HttpStatus.OK;
   private volatile Duration discoveryDelay = Duration.ZERO;
   private volatile String discoveryBody = null;
+  private volatile CountDownLatch discoveryArrived = null;
+  private volatile CompletableFuture<Void> discoveryGate = null;
 
   public DiscoveryTestServer(String jwksJson) {
     this.jwksJson = jwksJson;
@@ -35,12 +39,22 @@ public final class DiscoveryTestServer implements AutoCloseable {
                 "/.well-known/openid-configuration",
                 (ctx, req) -> {
                   discoveryHits.incrementAndGet();
+                  CountDownLatch arrived = discoveryArrived;
+                  if (arrived != null) {
+                    arrived.countDown();
+                  }
                   String body = discoveryBody;
-                  HttpResponse response =
+                  HttpResponse base =
                       discoveryStatus.equals(HttpStatus.OK)
                           ? HttpResponse.of(
                               MediaType.JSON, body != null ? body : discoveryDocument())
                           : HttpResponse.of(discoveryStatus);
+                  CompletableFuture<Void> gate = discoveryGate;
+                  // A gated response is held until the test releases it, so "a fetch is in
+                  // flight" becomes a state the test controls rather than a window it has to
+                  // hope for.
+                  HttpResponse response =
+                      gate == null ? base : HttpResponse.of(gate.thenApply(ignored -> base));
                   // Delayed rather than slept: the handler runs on an event loop and must not
                   // block.
                   return discoveryDelay.isZero()
@@ -82,6 +96,19 @@ public final class DiscoveryTestServer implements AutoCloseable {
   /** Delay subsequent discovery responses, to exercise the client-side timeout. */
   public void delayDiscoveryBy(Duration delay) {
     this.discoveryDelay = delay;
+  }
+
+  /**
+   * Hold every discovery response until the returned future is completed, and count each arriving
+   * request down on {@code arrived}. Together these turn "a discovery fetch is in flight" into an
+   * observable, test-controlled state: await {@code arrived}, do whatever must happen while the
+   * fetch is outstanding, then complete the future to let it finish. Nothing here sleeps.
+   */
+  public CompletableFuture<Void> gateDiscoveryOn(CountDownLatch arrived) {
+    CompletableFuture<Void> gate = new CompletableFuture<>();
+    this.discoveryArrived = arrived;
+    this.discoveryGate = gate;
+    return gate;
   }
 
   public int discoveryHits() {

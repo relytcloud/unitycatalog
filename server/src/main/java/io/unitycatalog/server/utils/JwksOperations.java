@@ -47,6 +47,7 @@ import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 import lombok.SneakyThrows;
 import org.slf4j.Logger;
@@ -99,9 +100,24 @@ public class JwksOperations {
    */
   private static final Pattern NUMERIC_HOST = Pattern.compile("\\d+(\\.\\d+)*");
 
+  /**
+   * How often a failure-path log line may be repeated for one issuer. A failed discovery is never
+   * cached -- see {@link #discover} -- so during an identity-provider outage every token exchange
+   * runs the whole path again. Without a cooldown that is one WARN per exchange, which buries the
+   * rest of the log exactly when it is being read.
+   */
+  private static final Duration LOG_COOLDOWN = Duration.ofSeconds(60);
+
   private record CachedDiscovery(String jwksUri, JwkProvider provider, Instant fetchedAt) {}
 
   private final Map<String, CachedDiscovery> discoveryCache = new ConcurrentHashMap<>();
+
+  /** Per-issuer single-flight locks for {@link #discover}. */
+  private final Map<String, Object> discoveryLocks = new ConcurrentHashMap<>();
+
+  private final LogCooldown fallthroughWarnCooldown = new LogCooldown(LOG_COOLDOWN);
+
+  private final LogCooldown remoteKeyFetchWarnCooldown = new LogCooldown(LOG_COOLDOWN);
 
   private final WebClient webClient = WebClient.builder().responseTimeout(HTTP_TIMEOUT).build();
   private static final ObjectMapper mapper = new ObjectMapper();
@@ -193,7 +209,7 @@ public class JwksOperations {
    * instead of failing fast. Its mirror is an IdP answering 200 with {@code {"keys":[]}}, which is
    * a plain {@code SigningKeyNotFoundException} and so was reported as a rejected token.
    */
-  private static BaseException keyLookupFailure(
+  private BaseException keyLookupFailure(
       ResolvedProvider resolved, String issuer, JwkException cause) {
     if (keySetWasObtained(cause)) {
       // The key set was read and is intact; it just holds no key with this kid. The only
@@ -215,8 +231,12 @@ public class JwksOperations {
               issuer, resolved.location(), cause.getMessage()),
           cause);
     }
-    LOGGER.warn(
-        "Issuer '{}': could not fetch signing keys from the identity provider", issuer, cause);
+    if (remoteKeyFetchWarnCooldown.allow(issuer)) {
+      // Throttled: an identity-provider outage fails every exchange, and the stack trace is worth
+      // once a minute per issuer, not once per request.
+      LOGGER.warn(
+          "Issuer '{}': could not fetch signing keys from the identity provider", issuer, cause);
+    }
     return new OAuthInvalidRequestException(
         ErrorCode.UNAVAILABLE,
         "Could not reach the identity provider to fetch the signing keys for issuer " + issuer,
@@ -323,110 +343,178 @@ public class JwksOperations {
               ? issuer
               : "https://" + issuer;
 
-      CachedDiscovery cached = discoveryCache.get(normalizedIssuer);
-      if (cached != null
-          && Duration.between(cached.fetchedAt(), Instant.now()).compareTo(DISCOVERY_TTL) < 0) {
-        return new ResolvedProvider(
-            cached.provider(), KeySource.DISCOVERY, normalizedIssuer);
+      CachedDiscovery cached = freshDiscovery(normalizedIssuer);
+      if (cached != null) {
+        return new ResolvedProvider(cached.provider(), KeySource.DISCOVERY, normalizedIssuer);
       }
 
-      // Below the cache-hit return, so this fires on an actual discovery fetch only -- at most
-      // once per issuer per DISCOVERY_TTL. That is what makes INFO affordable here, and what lets
-      // an operator confirm caching works by seeing the line once rather than per exchange.
-      LOGGER.info("Issuer '{}': resolving keys by OIDC discovery", issuer);
-      String externalJwksFile =
-          serverProperties != null ? serverProperties.getExternalJwksFile() : null;
-      if (externalJwksFile != null && !externalJwksFile.isBlank()) {
-        // A JWKS file is configured but does not declare this issuer. For an issuer that is
-        // supposed to be file-held, a typo'd "issuer" member is exactly how it silently reroutes
-        // to discovery; without this line the operator has nothing to go on. For Entra in a mixed
-        // deployment the fallback is expected -- hence a warning, not a failure.
-        LOGGER.warn(
-            "Issuer '{}' is not declared in the external JWKS file '{}', so its keys are being"
-                + " resolved by OIDC discovery. If this issuer's keys are meant to come from the"
-                + " file, check the 'issuer' member of its JWK entries.",
-            issuer,
-            externalJwksFile);
-      }
-
-      // Get the JWKS from the OIDC well-known location described here
-      // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
-
-      String wellKnownConfigUrl = normalizedIssuer;
-
-      if (!wellKnownConfigUrl.endsWith("/")) {
-        wellKnownConfigUrl += "/";
-      }
-
-      var path = wellKnownConfigUrl + ".well-known/openid-configuration";
-      LOGGER.debug("path: {}", path);
-
-      AggregatedHttpResponse discoveryResponse;
-      try {
-        discoveryResponse = webClient.get(path).aggregate().join();
-      } catch (CompletionException e) {
-        if (e.getCause() instanceof ResponseTimeoutException) {
-          throw new OAuthInvalidRequestException(
-              ErrorCode.DEADLINE_EXCEEDED,
-              "Timed out fetching the OIDC configuration for issuer " + normalizedIssuer,
-              e);
+      // Single-flight, per issuer: one thread fetches and the rest wait for its result, instead
+      // of every concurrent token exchange pinning its own Armeria blocking thread on a 5-second
+      // fetch. That is the cold-start case and, more importantly, the whole duration of an
+      // identity-provider outage, because a failed discovery is deliberately never cached.
+      //
+      // The lock object -- not the fetch -- is what computeIfAbsent creates. Doing the fetch
+      // inside computeIfAbsent would hold a ConcurrentHashMap bin lock across a network call,
+      // blocking unrelated issuers that happen to hash to the same bin and risking the map's own
+      // recursive-update failure. The map is keyed by normalized issuer and so is bounded by the
+      // allow-list that has already admitted this issuer upstream.
+      Object discoveryLock = discoveryLocks.computeIfAbsent(normalizedIssuer, key -> new Object());
+      synchronized (discoveryLock) {
+        // Re-checked on entry: while this thread waited, a peer may have completed discovery and
+        // published its result. On a FAILURE the peer wrote nothing and released the lock, so
+        // this thread goes on to retry -- failures are still never cached.
+        CachedDiscovery landed = freshDiscovery(normalizedIssuer);
+        if (landed != null) {
+          return new ResolvedProvider(landed.provider(), KeySource.DISCOVERY, normalizedIssuer);
         }
-        throw new OAuthInvalidRequestException(
-            ErrorCode.UNAVAILABLE,
-            "Could not reach the identity provider for issuer " + normalizedIssuer,
-            e);
+        return new ResolvedProvider(
+            discover(issuer, normalizedIssuer), KeySource.DISCOVERY, normalizedIssuer);
       }
-
-      if (!discoveryResponse.status().isSuccess()) {
-        throw new OAuthInvalidRequestException(
-            ErrorCode.UNAVAILABLE,
-            String.format(
-                "Identity provider returned HTTP %d for the OIDC configuration of issuer %s",
-                discoveryResponse.status().code(), normalizedIssuer));
-      }
-
-      String response = discoveryResponse.contentUtf8();
-
-      // A 200 with a body that is not a JSON object is an upstream failure like any other, not a
-      // programming error: without this the Jackson IOException escapes through @SneakyThrows,
-      // matches no GlobalExceptionHandler branch, and surfaces as a bodyless HTTP 500.
-      Map<String, Object> configMap;
-      try {
-        configMap = mapper.readValue(response, new TypeReference<>() {});
-      } catch (JsonProcessingException e) {
-        throw new OAuthInvalidRequestException(
-            ErrorCode.UNAVAILABLE,
-            "Identity provider returned a malformed OIDC configuration for issuer "
-                + normalizedIssuer,
-            e);
-      }
-
-      if (configMap == null || configMap.isEmpty()) {
-        throw new OAuthInvalidRequestException(ErrorCode.UNAVAILABLE,
-            "Could not get issuer configuration");
-      }
-
-      String configIssuer = stringMember(configMap, "issuer", normalizedIssuer);
-      String configJwksUri = stringMember(configMap, "jwks_uri", normalizedIssuer);
-
-      // Null when the document has no "issuer" member at all -- a mismatch like any other, and
-      // checked explicitly so a malformed document cannot NPE its way to a bodyless 500.
-      if (configIssuer == null || !configIssuer.equals(normalizedIssuer)) {
-        throw new OAuthInvalidRequestException(ErrorCode.ABORTED,
-            "Issuer doesn't match configuration");
-      }
-
-      if (configJwksUri == null) {
-        throw new OAuthInvalidRequestException(ErrorCode.ABORTED, "JWKS configuration missing");
-      }
-
-      // Validated before the provider is built, so a rejected jwks_uri is never cached for
-      // DISCOVERY_TTL and no connection is ever opened to it.
-      JwkProvider provider = remoteProvider(configJwksUri, normalizedIssuer);
-      discoveryCache.put(
-          normalizedIssuer, new CachedDiscovery(configJwksUri, provider, Instant.now()));
-      return new ResolvedProvider(provider, KeySource.DISCOVERY, normalizedIssuer);
     }
+  }
+
+  /** The cached provider for an issuer, while it is still inside {@link #DISCOVERY_TTL}. */
+  private CachedDiscovery freshDiscovery(String normalizedIssuer) {
+    CachedDiscovery cached = discoveryCache.get(normalizedIssuer);
+    if (cached == null
+        || Duration.between(cached.fetchedAt(), Instant.now()).compareTo(DISCOVERY_TTL) >= 0) {
+      return null;
+    }
+    return cached;
+  }
+
+  /**
+   * Fetch and validate the issuer's OIDC discovery document, build the key provider it names, and
+   * cache it. Called with this issuer's discovery lock held, and only on a cache miss.
+   *
+   * <p>Nothing is written to the cache unless a usable provider was produced, so every failure
+   * here -- unreachable, timed out, non-2xx, malformed, mismatched issuer, rejected jwks_uri -- is
+   * retried by the next request rather than pinned for {@link #DISCOVERY_TTL}. Caching failures
+   * would turn a transient upstream blip into a local outage that an unauthenticated caller can
+   * trigger, since the token endpoint needs no credentials.
+   */
+  private JwkProvider discover(String issuer, String normalizedIssuer) {
+    // Reached only past the cache check in resolveJwkProvider, so this fires on an actual
+    // discovery fetch -- for a healthy issuer, at most once per DISCOVERY_TTL. That is what makes
+    // INFO affordable here, and what lets an operator confirm caching works by seeing the line
+    // once rather than per exchange.
+    LOGGER.info("Issuer '{}': resolving keys by OIDC discovery", issuer);
+    String externalJwksFile =
+        serverProperties != null ? serverProperties.getExternalJwksFile() : null;
+    if (shouldWarnOnDiscoveryFallthrough(issuer, externalJwksFile)
+        && fallthroughWarnCooldown.allow(issuer)) {
+      LOGGER.warn(
+          "Issuer '{}' is not declared in the external JWKS file '{}', so its keys are being"
+              + " resolved by OIDC discovery. If this issuer's keys are meant to come from the"
+              + " file, check the 'issuer' member of its JWK entries.",
+          issuer,
+          externalJwksFile);
+    }
+
+    // Get the JWKS from the OIDC well-known location described here
+    // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
+
+    String wellKnownConfigUrl = normalizedIssuer;
+
+    if (!wellKnownConfigUrl.endsWith("/")) {
+      wellKnownConfigUrl += "/";
+    }
+
+    var path = wellKnownConfigUrl + ".well-known/openid-configuration";
+    LOGGER.debug("path: {}", path);
+
+    AggregatedHttpResponse discoveryResponse;
+    try {
+      discoveryResponse = webClient.get(path).aggregate().join();
+    } catch (CompletionException e) {
+      if (e.getCause() instanceof ResponseTimeoutException) {
+        throw new OAuthInvalidRequestException(
+            ErrorCode.DEADLINE_EXCEEDED,
+            "Timed out fetching the OIDC configuration for issuer " + normalizedIssuer,
+            e);
+      }
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Could not reach the identity provider for issuer " + normalizedIssuer,
+          e);
+    }
+
+    if (!discoveryResponse.status().isSuccess()) {
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          String.format(
+              "Identity provider returned HTTP %d for the OIDC configuration of issuer %s",
+              discoveryResponse.status().code(), normalizedIssuer));
+    }
+
+    String response = discoveryResponse.contentUtf8();
+
+    // A 200 with a body that is not a JSON object is an upstream failure like any other, not a
+    // programming error: without this the Jackson IOException escapes through @SneakyThrows,
+    // matches no GlobalExceptionHandler branch, and surfaces as a bodyless HTTP 500.
+    Map<String, Object> configMap;
+    try {
+      configMap = mapper.readValue(response, new TypeReference<>() {});
+    } catch (JsonProcessingException e) {
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Identity provider returned a malformed OIDC configuration for issuer "
+              + normalizedIssuer,
+          e);
+    }
+
+    if (configMap == null || configMap.isEmpty()) {
+      throw new OAuthInvalidRequestException(ErrorCode.UNAVAILABLE,
+          "Could not get issuer configuration");
+    }
+
+    String configIssuer = stringMember(configMap, "issuer", normalizedIssuer);
+    String configJwksUri = stringMember(configMap, "jwks_uri", normalizedIssuer);
+
+    // Null when the document has no "issuer" member at all -- a mismatch like any other, and
+    // checked explicitly so a malformed document cannot NPE its way to a bodyless 500.
+    if (configIssuer == null || !configIssuer.equals(normalizedIssuer)) {
+      throw new OAuthInvalidRequestException(ErrorCode.ABORTED,
+          "Issuer doesn't match configuration");
+    }
+
+    if (configJwksUri == null) {
+      throw new OAuthInvalidRequestException(ErrorCode.ABORTED, "JWKS configuration missing");
+    }
+
+    // Validated before the provider is built, so a rejected jwks_uri is never cached for
+    // DISCOVERY_TTL and no connection is ever opened to it.
+    JwkProvider provider = remoteProvider(configJwksUri, normalizedIssuer);
+    discoveryCache.put(
+        normalizedIssuer, new CachedDiscovery(configJwksUri, provider, Instant.now()));
+    return provider;
+  }
+
+  /**
+   * Whether an issuer reaching OIDC discovery, while a static JWKS file is configured, is worth
+   * warning about.
+   *
+   * <p>The warning exists for one failure mode: an issuer that is MEANT to be file-held, whose
+   * {@code issuer} member is typo'd, silently reroutes to discovery and then fails there. A
+   * configured Entra tenant reaching discovery is not that -- discovery is the only path Entra has,
+   * because its keys rotate and cannot live in a hand-maintained file. Warning about it in every
+   * mixed JWKS-file + Entra deployment is how an operator is trained to ignore the line that was
+   * meant to catch the typo.
+   *
+   * <p>Extracted so the rule itself can be unit-tested. Asserting on log output would pin the
+   * wording instead of the decision, and would break on any reformatting of the message.
+   *
+   * @param externalJwksFile the configured static JWKS file, or null/blank when there is none
+   */
+  boolean shouldWarnOnDiscoveryFallthrough(String issuer, String externalJwksFile) {
+    if (externalJwksFile == null || externalJwksFile.isBlank()) {
+      // Nothing is meant to be file-held, so nothing can have fallen through by mistake.
+      return false;
+    }
+    // Null for the single-argument constructor, which carries no ServerProperties at all, and for
+    // a deployment with no Entra tenant configured.
+    String entraIssuer = serverProperties != null ? serverProperties.getEntraIssuer() : null;
+    return !issuer.equals(entraIssuer);
   }
 
   /**
@@ -656,6 +744,43 @@ public class JwksOperations {
     } catch (IOException e) {
       LOGGER.warn("Failed to read external JWKS file '{}' for issuer discovery", jwksPath, e);
       return Set.of();
+    }
+  }
+
+  /**
+   * A per-key "has this been logged recently" gate, for log lines on a path that repeats for as
+   * long as an upstream failure lasts.
+   *
+   * <p>Only the FAILURE paths are gated. The discovery INFO already fires at most once per issuer
+   * per {@link #DISCOVERY_TTL}, because it sits below the cache-hit return, so throttling it would
+   * only risk hiding the one line an operator uses to confirm caching works.
+   *
+   * <p>Timed on {@link System#nanoTime()}, which is monotonic: a wall-clock step (NTP, a DST jump)
+   * cannot silence a whole issuer for hours or defeat the cooldown entirely. The compare-and-set
+   * is what keeps a burst of concurrent failures to one line rather than one per thread; a thread
+   * that loses the race simply does not log.
+   */
+  static final class LogCooldown {
+
+    private final Map<String, AtomicLong> lastLoggedNanos = new ConcurrentHashMap<>();
+    private final long cooldownNanos;
+
+    LogCooldown(Duration cooldown) {
+      this.cooldownNanos = cooldown.toNanos();
+    }
+
+    /** Whether the caller may log for this key now, taking the slot if so. */
+    boolean allow(String key) {
+      long now = System.nanoTime();
+      AtomicLong lastLogged =
+          lastLoggedNanos.computeIfAbsent(key, k -> new AtomicLong(now - cooldownNanos - 1));
+      long previous = lastLogged.get();
+      // Subtraction, not comparison: nanoTime has an arbitrary origin and may be negative, so
+      // `now > previous + cooldown` can be wrong across the wrap that this form survives.
+      if (now - previous < cooldownNanos) {
+        return false;
+      }
+      return lastLogged.compareAndSet(previous, now);
     }
   }
 
