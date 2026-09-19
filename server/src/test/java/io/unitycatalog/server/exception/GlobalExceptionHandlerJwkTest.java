@@ -50,7 +50,23 @@ public class GlobalExceptionHandlerJwkTest {
         responseFor(new SigningKeyNotFoundException("no such kid", null));
 
     assertThat(response.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
-    assertThat(response.contentUtf8()).contains("no such kid");
+    assertThat(response.contentUtf8()).contains("signing key could not be verified");
+  }
+
+  @Test
+  public void theUnclassifiedFallbackDoesNotEchoAuth0sMessage() {
+    // Every auth0 key-lookup wording names the key set's location -- a server file path here, an
+    // IdP's jwks_uri for a discovered set. This branch answers whoever presented the token, so it
+    // reports the kind of failure and logs the rest. Same rule as JwksOperations.keyLookupFailure,
+    // which is what classifies these in practice; this is the safety net behind it.
+    AggregatedHttpResponse response =
+        responseFor(
+            new SigningKeyNotFoundException(
+                "No key found in file:/opt/uc/etc/conf/certs.json with kid abc", null));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    assertThat(response.contentUtf8()).doesNotContain("/opt/uc/etc/conf/certs.json");
+    assertThat(response.contentUtf8()).doesNotContain("file:");
   }
 
   @Test
@@ -98,11 +114,16 @@ public class GlobalExceptionHandlerJwkTest {
 
   @Test
   public void rejectedKidIsRenderedAsUnauthorized() {
+    // The shape JwksOperations produces for a kid that no registered key matches: the issuer,
+    // which came from the caller's own token, and nothing about where the key set lives.
     AggregatedHttpResponse response =
         responseFor(
             new OAuthInvalidClientException(
-                ErrorCode.UNAUTHENTICATED, "Invalid signing key: no such kid"));
+                ErrorCode.UNAUTHENTICATED,
+                "No signing key matching the token's 'kid' is registered for issuer"
+                    + " https://idp.example"));
 
     assertThat(response.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    assertThat(response.contentUtf8()).doesNotContain("file:");
   }
 }

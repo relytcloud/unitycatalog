@@ -3,6 +3,7 @@ package io.unitycatalog.server.utils;
 import static io.unitycatalog.server.security.SecurityContext.Issuers.INTERNAL;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -10,12 +11,16 @@ import com.auth0.jwk.JwkProvider;
 import com.auth0.jwk.JwkProviderBuilder;
 import com.auth0.jwk.NetworkException;
 import com.auth0.jwk.SigningKeyNotFoundException;
+import com.linecorp.armeria.common.HttpRequest;
+import com.linecorp.armeria.server.ServiceRequestContext;
 import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
+import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.security.SecurityContext;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -140,6 +145,11 @@ public class JwksKeyLookupClassificationTest {
     assertThatThrownBy(
             () -> ops.verifierForIssuerAndKey("issuer-a", "not-this-kid", "ES256", List.of()))
         .isInstanceOf(BaseException.class)
+        // auth0's wording for this is "No key found in file:/<path> with kid ...". Passing it
+        // through handed the file's path to a caller who only had to present some bearer token.
+        .hasMessageNotContaining(jwksFile.toString())
+        .hasMessageNotContaining("file:")
+        .hasMessageContaining("issuer-a")
         .extracting(e -> ((BaseException) e).getErrorCode())
         .isEqualTo(ErrorCode.UNAUTHENTICATED);
   }
@@ -185,6 +195,9 @@ public class JwksKeyLookupClassificationTest {
       assertThatThrownBy(
               () -> ops.verifierForIssuerAndKey(idp.issuer(), "not-this-kid", "ES256", List.of()))
           .isInstanceOf(BaseException.class)
+          // Same rule for a discovered key set: auth0 names the jwks_uri, and the response must
+          // not. The issuer itself is fine -- it came from the caller's own token.
+          .hasMessageNotContaining(idp.issuer() + "/keys")
           .extracting(e -> ((BaseException) e).getErrorCode())
           .isEqualTo(ErrorCode.UNAUTHENTICATED);
     }
@@ -200,6 +213,73 @@ public class JwksKeyLookupClassificationTest {
       assertThat(ops.verifierForIssuerAndKey(idp.issuer(), "kidRemote", "ES256", List.of()))
           .isNotNull();
     }
+  }
+
+  @Test
+  public void noKeyFailureEverPutsTheKeySetLocationInTheResponseBody() throws Exception {
+    // The guard for the rule as a whole, asserted on the bytes a caller actually receives rather
+    // than on an exception message, so it also covers however GlobalExceptionHandler renders
+    // these. Every branch below is reachable by anyone who can present a bearer token at all:
+    // AuthDecorator resolves signing keys on every authenticated route.
+    Path healthyFile = fileWith("{\"keys\":[" + entry("kidA", "issuer-a") + "]}");
+    Path malformedFile = fileWith("{\"keys\":[{\"kid\":\"kidB\",\"issuer\":\"issuer-b\"}]}");
+    Path missingCerts = Path.of("/no/such/dir/uc-certs-for-this-test.json");
+
+    // 1. kid miss against a healthy local key set -> 401.
+    assertThat(
+            responseBodyFor(
+                () ->
+                    opsWithJwksFile(healthyFile)
+                        .verifierForIssuerAndKey("issuer-a", "not-this-kid", "ES256", List.of())))
+        .doesNotContain(healthyFile.toString())
+        .doesNotContain("file:");
+
+    // 2. a local key set that cannot be parsed -> 500.
+    assertThat(
+            responseBodyFor(
+                () ->
+                    opsWithJwksFile(malformedFile)
+                        .verifierForIssuerAndKey("issuer-b", "kidB", "ES256", List.of())))
+        .doesNotContain(malformedFile.toString())
+        .doesNotContain("file:");
+
+    // 3. a local key file that is not there at all -> 500.
+    assertThat(
+            responseBodyFor(
+                () ->
+                    opsWithCertsFile(missingCerts)
+                        .verifierForIssuerAndKey(INTERNAL, "any-kid", "RS256", List.of())))
+        .doesNotContain(missingCerts.toString())
+        .doesNotContain("/no/such/dir")
+        .doesNotContain("file:");
+  }
+
+  @Test
+  public void noRemoteKeyFailurePutsTheJwksUriInTheResponseBody() throws Exception {
+    // Same rule for a discovered key set: the jwks_uri is the identity provider's, not the
+    // caller's, and nothing needs it to understand a 401 or a 503.
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + entry("kidRemote", null) + "]}")) {
+      JwksOperations ops =
+          opsWithJwksFile(fileWith("{\"keys\":[" + entry("kidLocal", "other-issuer") + "]}"));
+
+      assertThat(
+              responseBodyFor(
+                  () ->
+                      ops.verifierForIssuerAndKey(idp.issuer(), "no-such-kid", "ES256", List.of())))
+          .doesNotContain(idp.issuer() + "/keys");
+    }
+  }
+
+  /** The bytes a caller receives for a failure, rendered by the real exception handler. */
+  private static String responseBodyFor(ThrowingCallable call) {
+    Throwable thrown = catchThrowable(call);
+    assertThat(thrown).as("the call was expected to fail").isNotNull();
+    return new GlobalExceptionHandler()
+        .handleException(mock(ServiceRequestContext.class), mock(HttpRequest.class), thrown)
+        .aggregate()
+        .join()
+        .contentUtf8();
   }
 
   /**

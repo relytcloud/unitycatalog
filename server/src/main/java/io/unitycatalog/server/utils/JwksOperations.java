@@ -208,14 +208,35 @@ public class JwksOperations {
    * authenticated API call, with the filename dropped, which load balancers and clients retry
    * instead of failing fast. Its mirror is an IdP answering 200 with {@code {"keys":[]}}, which is
    * a plain {@code SigningKeyNotFoundException} and so was reported as a rejected token.
+   *
+   * <p>One rule holds across all three branches: the message handed back to the caller never
+   * carries a provider URL or a filesystem path. Every branch here is reachable by anyone who can
+   * present a bearer token, so the location of the key set -- a server path, or the IdP's
+   * jwks_uri -- is logged and never returned. The remote branch says only "the identity provider
+   * for issuer X", where X is the issuer the caller's own token claimed.
    */
   private BaseException keyLookupFailure(
       ResolvedProvider resolved, String issuer, JwkException cause) {
     if (keySetWasObtained(cause)) {
       // The key set was read and is intact; it just holds no key with this kid. The only
-      // genuinely rejected-token case.
+      // genuinely rejected-token case -- and so the only one logged at DEBUG: nothing about the
+      // server is wrong, and a caller can produce this at will by sending any 'kid'.
+      //
+      // auth0's wording names the key set's LOCATION -- "No key found in
+      // file:/opt/uc/etc/conf/certs.json with kid ..." for a file-backed provider, or the IdP's
+      // jwks_uri for a discovered one. That is why it is not passed through: the rule for this
+      // whole method is that a client-facing message carries no provider URL and no filesystem
+      // path, because AuthDecorator runs on every authenticated route and any bearer token at
+      // all reaches it. The location belongs in the log, which is where an operator reads it.
+      LOGGER.debug(
+          "Issuer '{}': no signing key matched the presented kid ({})",
+          issuer,
+          resolved.location(),
+          cause);
       return new OAuthInvalidClientException(
-          ErrorCode.UNAUTHENTICATED, "Invalid signing key: " + cause.getMessage(), cause);
+          ErrorCode.UNAUTHENTICATED,
+          "No signing key matching the token's 'kid' is registered for issuer " + issuer,
+          cause);
     }
     if (resolved.source().isLocalFile()) {
       LOGGER.error(
