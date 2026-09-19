@@ -417,13 +417,11 @@ public class JwksOperations {
    * retried by the next request rather than pinned for {@link #DISCOVERY_TTL}. Caching failures
    * would turn a transient upstream blip into a local outage that an unauthenticated caller can
    * trigger, since the token endpoint needs no credentials.
+   *
+   * <p>Which is also why the only INFO here sits at the very end, on the successful path: for as
+   * long as an issuer is failing, nothing is cached and this method runs again for every exchange.
    */
   private JwkProvider discover(String issuer, String normalizedIssuer) {
-    // Reached only past the cache check in resolveJwkProvider, so this fires on an actual
-    // discovery fetch -- for a healthy issuer, at most once per DISCOVERY_TTL. That is what makes
-    // INFO affordable here, and what lets an operator confirm caching works by seeing the line
-    // once rather than per exchange.
-    LOGGER.info("Issuer '{}': resolving keys by OIDC discovery", issuer);
     String externalJwksFile =
         serverProperties != null ? serverProperties.getExternalJwksFile() : null;
     if (shouldWarnOnDiscoveryFallthrough(issuer, externalJwksFile)
@@ -512,6 +510,13 @@ public class JwksOperations {
     JwkProvider provider = remoteProvider(configJwksUri, normalizedIssuer);
     discoveryCache.put(
         normalizedIssuer, new CachedDiscovery(configJwksUri, provider, Instant.now()));
+    // Reports a COMPLETED resolution, and is deliberately past the cache put. Before the fetch it
+    // read as "about to attempt", which is once per issuer per DISCOVERY_TTL only while discovery
+    // succeeds: a failure is never cached, so during an identity-provider outage that line fired
+    // on every exchange -- the same storm item 2 set out to stop, one level quieter. Here it is
+    // once per issuer per cache window in every condition, and a failed attempt is reported by
+    // the throttled WARN alone.
+    LOGGER.info("Issuer '{}': resolved signing keys by OIDC discovery", issuer);
     return provider;
   }
 

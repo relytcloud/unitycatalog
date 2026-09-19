@@ -1295,6 +1295,6 @@ Automated tests cannot prove that a real app registration emits the `email` clai
 2. Provision a UC user whose email matches the tenant user's.
 3. Obtain an Entra ID token for that user and POST it to `/api/1.0/unity-control/auth/tokens` with `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token_type=urn:ietf:params:oauth:token-type:id_token`.
 4. Expect a UC access token back, and confirm it works on a normal API call.
-5. Confirm the server log shows `resolving keys by OIDC discovery` for the Entra issuer and that a second exchange does not re-fetch the discovery document.
+5. Confirm the server log shows `resolved signing keys by OIDC discovery` for the Entra issuer and that a second exchange does not re-fetch the discovery document. (The line is logged on a successful resolution, so it is absent while the provider is unreachable; a failing issuer shows the throttled `warn` instead.)
 
 If the CLI is used for step 3 rather than a raw token: Entra requires an exact redirect-URI match for confidential clients, while `Oauth2CliExchange.findAvailablePort()` falls back to a random port whenever `server.redirect-port` is blank. The CLI does honour that property when it is set; what the deploy path did not do was render it. Setting it (and registering the matching `http://localhost:<port>`) is recorded in the spec as a known follow-up and is **not** part of this plan.

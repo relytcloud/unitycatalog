@@ -324,10 +324,13 @@ every verification (uncached, so a newly appended DWSU key takes effect with no 
 Entra the server caches the **built key provider** per issuer for 24h — not just the discovery
 document — so a token exchange normally does not re-fetch either the discovery document or Entra's
 JWKS. The underlying key lookup is additionally rate limited per issuer: a burst of 10 lookups,
-then one more every 6 seconds — 10 per minute. Each *actual* discovery fetch is logged at `info`
-(`resolving keys by OIDC discovery`, once per issuer per cache window, not on every exchange), so
-it is visible at the shipped `rootLogger.level = info`
+then one more every 6 seconds — 10 per minute. Each *successful* discovery fetch is logged at
+`info` (`resolved signing keys by OIDC discovery`, once per issuer per cache window, not on every
+exchange), so it is visible at the shipped `rootLogger.level = info`
 default: seeing that line once per issuer and not again is the confirmation that caching works.
+It reports a completed resolution on purpose: a failed discovery is never cached, so a line logged
+before the fetch would repeat on every exchange for as long as the provider was down. A failing
+issuer is reported by the `warn` below instead, at most once a minute per issuer.
 
 When an issuer falls back to discovery **while `UC_EXTERNAL_JWKS_FILE` is configured**, the server
 also logs a `warn` naming that issuer and the file. For a DWSU issuer that is the signal that its

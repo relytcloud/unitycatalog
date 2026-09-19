@@ -54,7 +54,11 @@ lazy val commonSettings = Seq(
     "org.slf4j" % "slf4j-api" % "2.0.13",
     "org.slf4j" % "slf4j-log4j12" % "2.0.13" % Test,
     "org.apache.logging.log4j" % "log4j-slf4j2-impl" % log4jVersion,
-    "org.apache.logging.log4j" % "log4j-api" % log4jVersion
+    "org.apache.logging.log4j" % "log4j-api" % log4jVersion,
+    // Already on the test classpath transitively, via log4j-slf4j2-impl. Declared explicitly
+    // because a test compiles against it: JwksOperationsTest attaches an appender to assert WHEN
+    // a log line is emitted, which is the only observable for a rule about logging.
+    "org.apache.logging.log4j" % "log4j-core" % log4jVersion % Test
   ),
   excludeDependencies ++= Seq(
     ExclusionRule("org.slf4j", "slf4j-reload4j")

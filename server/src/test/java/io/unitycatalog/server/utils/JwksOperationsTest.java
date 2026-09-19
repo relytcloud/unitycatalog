@@ -17,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -24,6 +25,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configurator;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -285,6 +293,112 @@ public class JwksOperationsTest {
 
       assertThat(ops.loadJwkProvider(idp.issuer()).get("kidRemote").getId()).isEqualTo("kidRemote");
       assertThat(idp.discoveryHits()).isEqualTo(2);
+    }
+  }
+
+  @Test
+  public void theDiscoveryInfoIsEmittedOnlyOnASuccessfulResolution() throws Exception {
+    // The one place in this class where a log line IS the behaviour under test, so the log is
+    // what the test reads. Before this, the INFO sat ahead of the fetch and announced an attempt:
+    // a failed discovery is never cached, so for the whole of an identity-provider outage it
+    // fired on every single exchange -- the storm the WARN cooldown exists to stop, one level
+    // quieter. Past the cache put it is once per issuer per cache window in every condition.
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + entry("kidRemote", X_B, Y_B, null) + "]}")) {
+      idp.failDiscoveryWith(HttpStatus.SERVICE_UNAVAILABLE);
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      try (CapturedLog log = CapturedLog.of(JwksOperations.class)) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+          assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+              .isInstanceOf(BaseException.class);
+        }
+
+        // Three failed exchanges, no INFO. The throttled WARN is what reports the outage.
+        assertThat(log.infoMessagesMentioning(idp.issuer())).isEmpty();
+
+        idp.failDiscoveryWith(HttpStatus.OK);
+        ops.loadJwkProvider(idp.issuer());
+        ops.loadJwkProvider(idp.issuer());
+
+        // One line for the resolution that actually happened; the second call is a cache hit.
+        assertThat(log.infoMessagesMentioning(idp.issuer())).hasSize(1);
+        assertThat(log.infoMessagesMentioning(idp.issuer()).get(0))
+            .contains("resolved signing keys by OIDC discovery");
+      }
+    }
+  }
+
+  /**
+   * Captures one logger's events for the duration of a test, at INFO, and restores the logger on
+   * close. Events are filtered by a caller-supplied needle -- here the test's own issuer, which
+   * carries a port unique to its DiscoveryTestServer -- so a test class running beside this one
+   * cannot pollute the assertion.
+   */
+  private static final class CapturedLog implements AutoCloseable {
+
+    private final org.apache.logging.log4j.core.Logger logger;
+    private final Level previousLevel;
+    private final CollectingAppender appender;
+
+    private CapturedLog(
+        org.apache.logging.log4j.core.Logger logger,
+        Level previousLevel,
+        CollectingAppender appender) {
+      this.logger = logger;
+      this.previousLevel = previousLevel;
+      this.appender = appender;
+    }
+
+    static CapturedLog of(Class<?> type) {
+      String name = type.getName();
+      LoggerContext context = (LoggerContext) LogManager.getContext(false);
+      org.apache.logging.log4j.core.Logger logger = context.getLogger(name);
+      Level previousLevel = logger.getLevel();
+      // Set the level BEFORE attaching: Configurator.setLevel may install a fresh LoggerConfig
+      // for this name, which would drop an appender added first. Set explicitly so the test does
+      // not depend on whatever ambient level the suite happens to run under.
+      Configurator.setLevel(name, Level.INFO);
+      CollectingAppender appender = new CollectingAppender();
+      appender.start();
+      logger.addAppender(appender);
+      return new CapturedLog(logger, previousLevel, appender);
+    }
+
+    List<String> infoMessagesMentioning(String needle) {
+      return appender.messagesAt(Level.INFO).stream().filter(m -> m.contains(needle)).toList();
+    }
+
+    @Override
+    public void close() {
+      logger.removeAppender(appender);
+      appender.stop();
+      Configurator.setLevel(logger.getName(), previousLevel);
+    }
+  }
+
+  private static final class CollectingAppender extends AbstractAppender {
+
+    private final List<LogEvent> events = Collections.synchronizedList(new ArrayList<>());
+
+    CollectingAppender() {
+      super("uc-test-capture", null, null, true, Property.EMPTY_ARRAY);
+    }
+
+    @Override
+    public void append(LogEvent event) {
+      // Immutable copy: log4j reuses the mutable event instance after this returns.
+      events.add(event.toImmutable());
+    }
+
+    List<String> messagesAt(Level level) {
+      synchronized (events) {
+        return events.stream()
+            .filter(event -> level.equals(event.getLevel()))
+            .map(event -> event.getMessage().getFormattedMessage())
+            .toList();
+      }
     }
   }
 
