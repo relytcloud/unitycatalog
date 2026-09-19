@@ -115,6 +115,35 @@ public class AuthServicePrincipalErrorsTest extends BaseServerTest {
   }
 
   @Test
+  public void tokenWithAProvisionedEmailIsExchangedForThatEmail() {
+    // The positive case the other tests are the negative of. Without it, every assertion in this
+    // class would still hold if the principal lookup rejected EVERY user: the class never
+    // provisioned one, so "not provisioned" was the only outcome it could ever observe.
+    provisionUser("provisioned@example.com");
+
+    AggregatedHttpResponse response =
+        exchangeToken(dwsuToken(NON_ADMIN_SUB, Email.STRING, "provisioned@example.com"));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.OK);
+    // The 'email' claim names the principal, so it -- not 'sub' -- is what the issued token
+    // carries.
+    assertThat(subjectOfIssuedToken(response)).isEqualTo("provisioned@example.com");
+  }
+
+  @Test
+  public void entraTokenWithAProvisionedEmailIsExchangedForThatEmail() {
+    // The Entra shape: an opaque GUID 'sub' nobody provisions, and an 'email' optional claim that
+    // does name the user. The Entra-specific advice must not fire when the email resolves.
+    provisionUser("entra.person@example.com");
+
+    AggregatedHttpResponse response =
+        exchangeToken(entraToken(NON_ADMIN_SUB, Email.STRING, "entra.person@example.com"));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.OK);
+    assertThat(subjectOfIssuedToken(response)).isEqualTo("entra.person@example.com");
+  }
+
+  @Test
   public void tokenWithUnknownEmailSaysNotProvisioned() {
     AggregatedHttpResponse response =
         exchangeToken(dwsuToken(NON_ADMIN_SUB, Email.STRING, "nobody@example.com"));
