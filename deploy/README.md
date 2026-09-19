@@ -153,6 +153,7 @@ directory and you are back to an empty instance with everything to recreate.
 - Server log: **`$UC_HOME/etc/logs/server.log`** (rotated to `server-<time>-<n>.log.gz`); CLI log
   `etc/logs/cli.log`. Paths are relative to the working directory, and the script starts UC from
   `UC_HOME`, so pointing `UC_HOME` at a cloud disk persists the logs too.
+
 - Config file: **`etc/conf/server.log4j2.properties`** (log4j2). Common knobs:
 
   | Setting | Meaning | Default |
@@ -166,6 +167,7 @@ directory and you are back to an empty instance with everything to recreate.
   **Restart UC to apply** (log4j2 supports hot reload, but restarting is simplest here). For more
   retention raise `size` to `50MB` and `strategy.max` to `20`; when debugging set
   `rootLogger.level = debug` temporarily.
+
 - `var/log/observation.log` is not a business log (an empty file created by default by the Armeria
   observability component); it is gitignored and can be ignored.
 
@@ -234,6 +236,90 @@ Notes:
 - In containers, mount the JWKS file **as a directory**, not as a single file (docker single-file
   bind-mount, K8s `subPath`): the atomic replace swaps the file inode, and a single-file mount will
   never see the update.
+
+## Microsoft Entra ID sign-in
+
+Alongside the JWKS file, UC can trust Microsoft Entra ID (Azure AD) directly as a token-exchange
+issuer, so a Microsoft 365 tenant's users can exchange an Entra ID token for a UC access token
+without an instance signing key. This is separate from, and coexists with, DWSU onboarding above.
+
+### 1. App registration
+
+Create an app registration in the target tenant (**App registrations → New registration**). You
+need two values off its **Overview** page:
+
+- **Directory (tenant) ID** → `UC_ENTRA_TENANT_ID`
+- **Application (client) ID** → `UC_CLIENT_ID`
+
+Then create a client secret under **Certificates & secrets** → `UC_CLIENT_SECRET`. The server never
+uses this secret itself — it only ever verifies signatures with Entra's public keys — but a client
+running the authorization-code flow (the CLI today) needs it.
+
+### 2. Add `email` as an optional claim — this is required
+
+Under **Token configuration → Add optional claim → ID**, add `email`. Without it, the ID token
+carries only `sub` (an opaque GUID) and `preferred_username`; UC falls back to `sub` as the
+principal, that GUID never matches a provisioned user, and every exchange for that tenant fails.
+The server distinguishes this case explicitly — a token with no `email` claim fails with:
+
+```
+The subject token has no 'email' claim, so the principal fell back to 'sub'. For a
+Microsoft Entra ID token, add 'email' as an optional claim on the app registration so
+the token carries the address the user is provisioned under.
+```
+
+That message names the fix directly. Depending on the tenant, you may also need to grant admin
+consent for the `email` claim, or configure a verified domain, before Entra will emit it.
+
+### 3. Users must already exist in UC — there is no JIT provisioning
+
+UC does not create users on first sign-in. Provision each user in UC via SCIM first, using the
+**same address** the `email` claim carries. A resolved-but-unprovisioned subject fails with
+`User not provisioned: <email>` — a distinct message from the missing-claim case above, so you
+can tell "fix the app registration" apart from "provision this user" at a glance.
+
+### 4. Configure the three values in `uc.env`
+
+```
+UC_ENTRA_TENANT_ID=<directory-tenant-id>
+UC_CLIENT_ID=<application-client-id>
+UC_CLIENT_SECRET=<client-secret-value>
+```
+
+Restart UC to pick them up (unlike the JWKS file, this is a startup snapshot, not hot-reloaded).
+`deploy-uc.sh` derives the CLI's authorization/token URLs
+(`https://login.microsoftonline.com/<tenant>/oauth2/v2.0/{authorize,token}`) from the tenant id
+automatically; only set `UC_AUTHORIZATION_URL` / `UC_TOKEN_URL` yourself to override that.
+
+**`UC_ALLOWED_ISSUERS` does not need the Entra issuer.** Setting `UC_ENTRA_TENANT_ID` makes the
+server derive `https://login.microsoftonline.com/<tenant>/v2.0` and trust it — and accept
+`UC_CLIENT_ID` as an audience — automatically, unioned on top of whatever the JWKS file and
+`UC_ALLOWED_ISSUERS` already provide. Leave `UC_ALLOWED_ISSUERS` exactly as documented above.
+
+### 5. Coexistence with the static JWKS file
+
+The two trust sources are routed per issuer, not by "does a JWKS file exist": the static file
+(`UC_EXTERNAL_JWKS_FILE`) is authoritative only for the issuers it declares (each key's `issuer`
+member); every other issuer — including Entra — resolves by OIDC discovery instead. A deployment
+can run DWSU token-exchange and Entra sign-in at the same time, and the
+[DWSU hot-onboarding flow](#onboarding-a-new-dwsu-hot-no-restart) is unchanged.
+
+The two sources also behave differently under the hood, by design: the JWKS file is re-read on
+every verification (uncached, so a newly appended DWSU key takes effect with no restart), while for
+Entra the server caches the **built key provider** per issuer for 24h — not just the discovery
+document — so a token exchange normally does not re-fetch either the discovery document or Entra's
+JWKS. The underlying key lookup is additionally capped at 10 requests/minute per issuer. Expect the
+server log to show `resolving keys by OIDC discovery` once per issuer per cache window, not on
+every exchange.
+
+### 6. Network requirement
+
+UC needs outbound HTTPS to `login.microsoftonline.com` to fetch Entra's OIDC discovery document and
+JWKS. If that endpoint is unreachable, returns a non-2xx status, or the key lookup is rate-limited,
+the token exchange fails with **503** (`UNAVAILABLE`), not 401 — an outage is reported as an outage,
+not as a rejected token. A discovery request that exceeds the 5-second timeout instead fails with
+**504** (`DEADLINE_EXCEEDED`). Only a genuinely unknown signing key (a `kid` that Entra itself does
+not recognize) still maps to 401.
 
 ## Troubleshooting
 
