@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Properties;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -111,11 +112,46 @@ public class ServerPropertiesEntraTest {
   }
 
   @Test
-  public void blankTenantIsTreatedAsUnset() throws Exception {
+  public void blankTenantLineInAPropertiesFileLeavesThePropertyAbsent() throws Exception {
+    // Why blankTenantIsTreatedAsUnset below does not use a file. readPropertiesFromFile strips
+    // every blank-valued entry -- the server.properties shipped in etc/conf is full of them, for
+    // documentation -- so "server.entra.tenant-id=" in a file makes the property ABSENT. A test
+    // written that way takes nothingIsDerivedWithoutATenant's path and never executes the
+    // isBlank() half of the guard it is named after.
     ServerProperties props =
         propertiesWith("server.entra.tenant-id=", "server.client-id=some-client-id");
 
+    assertThat(props.getEntraTenantId()).isNull();
+  }
+
+  @Test
+  public void blankTenantIsTreatedAsUnset() {
+    // The blank value is reachable: the Properties constructor is a bare putAll with no
+    // stripping, and it is what BaseServerTest -- and so every server-level test, and anything
+    // else building ServerProperties in memory -- uses.
+    Properties raw = new Properties();
+    raw.setProperty("server.entra.tenant-id", "");
+    raw.setProperty("server.client-id", "some-client-id");
+    ServerProperties props = new ServerProperties(raw);
+
+    // Present and blank. Without this the test would silently drift back onto the null path and
+    // pass for the wrong reason, which is exactly what it did before.
+    assertThat(props.getEntraTenantId()).isEmpty();
+
     assertThat(props.getEntraIssuer()).isNull();
     assertThat(props.getAudiences()).isEmpty();
+    assertThat(props.getAllowedIssuers()).isEmpty();
+  }
+
+  @Test
+  public void whitespaceOnlyTenantIsTreatedAsUnset() {
+    // Otherwise the derived issuer would be the nonsense https://login.microsoftonline.com/ /v2.0
+    // and it would be unioned into the trusted issuers.
+    Properties raw = new Properties();
+    raw.setProperty("server.entra.tenant-id", "   ");
+    ServerProperties props = new ServerProperties(raw);
+
+    assertThat(props.getEntraIssuer()).isNull();
+    assertThat(props.getAllowedIssuers()).isEmpty();
   }
 }
