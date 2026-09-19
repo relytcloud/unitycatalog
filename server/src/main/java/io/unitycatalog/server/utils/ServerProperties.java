@@ -16,7 +16,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -31,6 +33,13 @@ import org.slf4j.LoggerFactory;
 public class ServerProperties {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(ServerProperties.class);
+
+  /**
+   * Fixed Microsoft Entra ID authority. Sovereign clouds (Azure China, US Gov) are deliberately
+   * unsupported; deployments are on the global cloud.
+   */
+  private static final String ENTRA_AUTHORITY = "https://login.microsoftonline.com";
+
   private final Properties properties = new Properties(generateDefaults());
 
   /** Validator interface for property values */
@@ -508,7 +517,7 @@ public class ServerProperties {
    * @return List of allowed issuer URLs (exact match required)
    */
   public List<String> getAllowedIssuers() {
-    return getCommaSeparatedList("server.allowed-issuers");
+    return unionWithDerived(getCommaSeparatedList("server.allowed-issuers"), getEntraIssuer());
   }
 
   /**
@@ -520,7 +529,67 @@ public class ServerProperties {
    * @return List of expected audience values
    */
   public List<String> getAudiences() {
-    return getCommaSeparatedList("server.audiences");
+    // The client id is only an accepted audience when an Entra tenant is configured; it exists
+    // upstream for the CLI's authorization-code flow and must not widen trust on its own.
+    String entraAudience = getEntraIssuer() == null ? null : getProperty("server.client-id");
+    return unionWithDerived(getCommaSeparatedList("server.audiences"), entraAudience);
+  }
+
+  /**
+   * Microsoft Entra ID tenant id. When set, the Entra issuer and audience are derived from it and
+   * unioned into {@link #getAllowedIssuers()} and {@link #getAudiences()}. When unset, nothing is
+   * derived and trust is exactly what the file configures.
+   */
+  public String getEntraTenantId() {
+    return getProperty("server.entra.tenant-id");
+  }
+
+  /**
+   * The Entra v2.0 issuer derived from {@code server.entra.tenant-id}, or null when no tenant is
+   * configured. This is the exact string Entra puts in the {@code iss} claim of a v2.0 token.
+   */
+  public String getEntraIssuer() {
+    String tenantId = getEntraTenantId();
+    if (tenantId == null || tenantId.isBlank()) {
+      return null;
+    }
+    return ENTRA_AUTHORITY + "/" + tenantId.trim() + "/v2.0";
+  }
+
+  /**
+   * Whether an issuer identifies Microsoft Entra ID: either the issuer derived from {@code
+   * server.entra.tenant-id}, or any issuer under the Entra authority, since an operator may instead
+   * have listed the issuer in {@code server.allowed-issuers} without setting a tenant id.
+   *
+   * <p>This only decides whether Entra-specific advice belongs in an error message. It grants no
+   * trust of its own: the allow-list check is what admits an issuer.
+   */
+  public boolean isEntraIssuer(String issuer) {
+    if (issuer == null || issuer.isBlank()) {
+      return false;
+    }
+    return issuer.equals(getEntraIssuer()) || issuer.startsWith(ENTRA_AUTHORITY + "/");
+  }
+
+  /**
+   * Union a configured list with a derived value. The derived value is appended only when it is
+   * present and not already configured, so derivation composes with explicit configuration rather
+   * than replacing it.
+   *
+   * <p>The result must stay null-TOLERANT. Callers test membership of a value taken straight from a
+   * token claim, which may legitimately be null, and {@code List.copyOf(...).contains(null)} throws
+   * NullPointerException where {@code Stream.toList().contains(null)} -- what {@link
+   * #getCommaSeparatedList} returns, and what these lists were before anything was derived into
+   * them -- simply returns false. Adding a derived value must not change that: an unauthenticated
+   * caller can decide whether the list is consulted with a null.
+   */
+  private static List<String> unionWithDerived(List<String> configured, String derived) {
+    if (derived == null || derived.isBlank() || configured.contains(derived)) {
+      return configured;
+    }
+    List<String> combined = new ArrayList<>(configured);
+    combined.add(derived);
+    return Collections.unmodifiableList(combined);
   }
 
   /**

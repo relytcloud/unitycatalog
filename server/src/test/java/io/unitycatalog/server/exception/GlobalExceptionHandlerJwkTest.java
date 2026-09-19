@@ -1,0 +1,129 @@
+package io.unitycatalog.server.exception;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+
+import com.auth0.jwk.NetworkException;
+import com.auth0.jwk.SigningKeyNotFoundException;
+import com.linecorp.armeria.common.AggregatedHttpResponse;
+import com.linecorp.armeria.common.HttpRequest;
+import com.linecorp.armeria.common.HttpResponse;
+import com.linecorp.armeria.common.HttpStatus;
+import com.linecorp.armeria.server.ServiceRequestContext;
+import org.junit.jupiter.api.Test;
+
+/**
+ * What this handler is still responsible for once signing-key failures are classified upstream.
+ *
+ * <p>It used to classify them here, by matching auth0's exception classes: NetworkException to 503,
+ * RateLimitReachedException to 503, anything else to 401. That was wrong, and unit tests that
+ * constructed those exceptions by hand could never have shown it -- they proved the branches were
+ * ordered correctly and said nothing about which branch a real failure lands in. {@code
+ * UrlJwkProvider} wraps every IOException as NetworkException, and the internal certs file and the
+ * static JWKS file are both UrlJwkProviders over {@code file:} URLs, so a deleted certs.json
+ * arrived here as a "network" failure and was answered with 503 "could not reach the identity
+ * provider" on every authenticated call.
+ *
+ * <p>Classification now lives in {@code JwksOperations}, where the provenance of the key set is
+ * known, and is tested against the real provider chain in {@code JwksKeyLookupClassificationTest}.
+ * What is left here is rendering an already-classified BaseException, and a safety net so no
+ * com.auth0.jwk exception can escape as a bodyless 500.
+ */
+public class GlobalExceptionHandlerJwkTest {
+
+  private AggregatedHttpResponse responseFor(Throwable cause) {
+    HttpResponse response =
+        new GlobalExceptionHandler()
+            .handleException(mock(ServiceRequestContext.class), mock(HttpRequest.class), cause);
+    return response.aggregate().join();
+  }
+
+  private HttpStatus statusFor(Throwable cause) {
+    return responseFor(cause).status();
+  }
+
+  @Test
+  public void anUnclassifiedJwkExceptionStillGetsABodyRatherThanABodylessError() {
+    // com.auth0.jwk exceptions are checked, and a sibling hierarchy of com.auth0.jwt's
+    // JWTVerificationException. Without this branch they reach Armeria's default handler.
+    AggregatedHttpResponse response =
+        responseFor(new SigningKeyNotFoundException("no such kid", null));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    assertThat(response.contentUtf8()).contains("signing key could not be verified");
+  }
+
+  @Test
+  public void theUnclassifiedFallbackDoesNotEchoAuth0sMessage() {
+    // Every auth0 key-lookup wording names the key set's location -- a server file path here, an
+    // IdP's jwks_uri for a discovered set. This branch answers whoever presented the token, so it
+    // reports the kind of failure and logs the rest. Same rule as JwksOperations.keyLookupFailure,
+    // which is what classifies these in practice; this is the safety net behind it.
+    AggregatedHttpResponse response =
+        responseFor(
+            new SigningKeyNotFoundException(
+                "No key found in file:/opt/uc/etc/conf/certs.json with kid abc", null));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    assertThat(response.contentUtf8()).doesNotContain("/opt/uc/etc/conf/certs.json");
+    assertThat(response.contentUtf8()).doesNotContain("file:");
+  }
+
+  @Test
+  public void theHandlerNoLongerClassifiesByAuth0ExceptionClass() {
+    // NetworkException means "cannot obtain jwks from url", which for a file: URL is a missing
+    // local file, not an unreachable identity provider. This handler cannot tell the difference,
+    // so it must not pretend to: it gets the same fallback as any other unclassified key failure,
+    // and JwksOperations is what decides the real answer.
+    assertThat(statusFor(new NetworkException("cannot obtain jwks", new RuntimeException())))
+        .isEqualTo(statusFor(new SigningKeyNotFoundException("no such kid", null)));
+  }
+
+  @Test
+  public void localKeyFileFaultIsRenderedAsAServerFaultWithoutNamingTheFile() {
+    // The shape JwksOperations now produces for a missing or unreadable certs.json. The file is
+    // named in the server-side ERROR log only: this body reaches anyone who presented a bearer
+    // token, so it must not disclose a server filesystem path.
+    AggregatedHttpResponse response =
+        responseFor(
+            new BaseException(
+                ErrorCode.INTERNAL,
+                "The server could not read its configured signing keys. This is a server"
+                    + " key-configuration problem, not a problem with the token; see the server"
+                    + " logs for details."));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    assertThat(response.contentUtf8()).contains("server key-configuration problem");
+    assertThat(response.contentUtf8()).doesNotContain("/opt/uc/etc/conf/certs.json");
+    // A 503 here tells every load balancer and client to retry a condition that never clears.
+    assertThat(response.status()).isNotEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+  }
+
+  @Test
+  public void anUpstreamKeyFetchFailureIsRenderedAsServiceUnavailable() {
+    AggregatedHttpResponse response =
+        responseFor(
+            new OAuthInvalidRequestException(
+                ErrorCode.UNAVAILABLE,
+                "Could not reach the identity provider to fetch the signing keys for issuer"
+                    + " https://idp.example"));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+    assertThat(response.contentUtf8()).contains("identity provider");
+  }
+
+  @Test
+  public void rejectedKidIsRenderedAsUnauthorized() {
+    // The shape JwksOperations produces for a kid that no registered key matches: the issuer,
+    // which came from the caller's own token, and nothing about where the key set lives.
+    AggregatedHttpResponse response =
+        responseFor(
+            new OAuthInvalidClientException(
+                ErrorCode.UNAUTHENTICATED,
+                "No signing key matching the token's 'kid' is registered for issuer"
+                    + " https://idp.example"));
+
+    assertThat(response.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    assertThat(response.contentUtf8()).doesNotContain("file:");
+  }
+}

@@ -52,6 +52,13 @@ Feature history of this fork, by PR merge date.
 - features: —
 - bugfix: `deploy-uc.sh` no longer refuses to start when `UC_ALLOWED_ISSUERS` is empty, which is the documented default (trusted issuers come from the external JWKS file).
 
+## 2026-09-19
+
+#15 (https://github.com/relytcloud/unitycatalog/pull/15)
+
+- features: Microsoft Entra ID as a token-exchange issuer. JWKS resolution is now per-issuer — the static JWKS file serves the issuers it declares, everything else resolves by OIDC discovery (cached, rate-limited, timed out) — so a DWSU deployment and an Entra tenant coexist. Configured with three values: tenant id, client id, client secret.
+- bugfix: An unreachable or rate-limited identity provider is reported as 503 instead of a misleading 401 "Invalid signing key"; a subject token missing the `email` claim now says so instead of failing as `User not allowed: <guid>`.
+
 ## ⚠️ Known gap: UI authentication is incomplete
 
 The UI currently has no per-user login: the standalone UI server injects a single

@@ -69,16 +69,39 @@ public class SecurityContext {
     LOGGER.info(getInternalCertsFile());
   }
 
+  /**
+   * The {@code email} claim of a subject token when it yields a usable address, otherwise {@code
+   * null}.
+   *
+   * <p>Presence is not usability. {@code Claim.asString()} returns null rather than throwing or
+   * coercing for a claim that is absent, JSON {@code null}, or present but of another JSON type (a
+   * number, an array, an object), so a claim can be present and still name no one.
+   */
+  public static String usableEmail(DecodedJWT decodedJWT) {
+    String email = decodedJWT.getClaim(JwtClaim.EMAIL.key()).asString();
+    return (email == null || email.isBlank()) ? null : email;
+  }
+
+  /**
+   * The principal a subject token names: its {@code email} claim when usable, else its {@code sub}.
+   *
+   * <p>This is the one definition of that rule, because two callers act on it and they must not
+   * disagree: AuthService decides whether to admit the principal, and {@link #createAccessToken}
+   * stamps it into the issued token. While they disagreed, a subject token carrying an explicit
+   * {@code "email": null} was admitted on its {@code sub} and then issued with a null subject -- an
+   * HTTP 200 handing back a credential that AuthDecorator rejects on every subsequent call.
+   */
+  public static String resolvePrincipalSubject(DecodedJWT decodedJWT) {
+    String email = usableEmail(decodedJWT);
+    return email != null ? email : decodedJWT.getClaim(JwtClaim.SUBJECT.key()).asString();
+  }
+
   public String createAccessToken(DecodedJWT decodedJWT) {
     return createAccessToken(decodedJWT, null);
   }
 
   public String createAccessToken(DecodedJWT decodedJWT, java.time.Duration ttl) {
-    String subject =
-        decodedJWT
-            .getClaims()
-            .getOrDefault(JwtClaim.EMAIL.key(), decodedJWT.getClaim(JwtClaim.SUBJECT.key()))
-            .asString();
+    String subject = resolvePrincipalSubject(decodedJWT);
 
     Date now = new Date();
     var builder =
