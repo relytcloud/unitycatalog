@@ -180,7 +180,8 @@ needed — only the right code on the existing `OAuthInvalidRequestException`.
 | `email` present, no matching UC user | `User not allowed: <email>` | A message saying the user is not provisioned. |
 | Key not found for a declared issuer | 401 (mapped in PR #6) | Unchanged, plus a log line naming the resolution path. |
 | Discovery or JWKS non-200 / unreachable | `ErrorCode.ABORTED`, which maps to **409** | `ErrorCode.UNAVAILABLE` → **503**. |
-| Discovery or JWKS times out | blocks indefinitely, no timeout | `ErrorCode.DEADLINE_EXCEEDED` → **504**. |
+| Discovery times out | blocks indefinitely, no timeout | `ErrorCode.DEADLINE_EXCEEDED` → **504**. |
+| JWKS fetch times out | blocks indefinitely, no timeout | The auth0 library wraps it as `NetworkException`, which `GlobalExceptionHandler` maps to `ErrorCode.UNAVAILABLE` → **503**, not 504. |
 
 The `email` fallback to `sub` is retained, because DWSU tokens legitimately rely on it. Only the
 *error* is split by cause. Messages describe configuration and never include token contents.

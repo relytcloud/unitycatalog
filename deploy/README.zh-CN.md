@@ -209,6 +209,88 @@ ConfigMap 只是"改这个文件"的一种投递方式。
 - 容器化部署时 JWKS 文件要按**目录**挂载，不要以单文件方式挂（docker 单文件 bind-mount、K8s `subPath`）：
   原子替换会换掉文件 inode，单文件挂载在容器内看不到更新。
 
+## Microsoft Entra ID 登录
+
+除了 JWKS 文件，UC 还可以直接把 Microsoft Entra ID（Azure AD）作为 token-exchange 的受信 issuer，这样
+Microsoft 365 租户里的用户不需要实例签名密钥，也能用 Entra ID token 换取 UC 的 access token。这条路径与
+上文的 DWSU 接入彼此独立，可以同时启用。
+
+### 1. 应用注册（App registration）
+
+在目标租户里创建一个应用注册（**App registrations → New registration**），从它的 **Overview** 页取两个
+值：
+
+- **Directory (tenant) ID** → `UC_ENTRA_TENANT_ID`
+- **Application (client) ID** → `UC_CLIENT_ID`
+
+再到 **Certificates & secrets** 下创建一个 client secret → `UC_CLIENT_SECRET`。服务端自己从不使用这个
+secret —— 它只用 Entra 的公钥验签 —— 但跑 authorization-code 流程的客户端（目前是 CLI）需要它。
+
+### 2. 把 `email` 加成 optional claim —— 这一步必须做
+
+在 **Token configuration → Add optional claim → ID** 下添加 `email`。不加的话，ID token 里只有 `sub`
+（一个不透明的 GUID）和 `preferred_username`；UC 会回退到用 `sub` 当 principal，而这个 GUID 永远匹配不到
+已开通的用户，该租户的每次交换都会失败。服务端把这种情况单独区分出来了 —— 没有 `email` claim 的 token
+会报：
+
+```
+The subject token has no 'email' claim, so the principal fell back to 'sub'. For a
+Microsoft Entra ID token, add 'email' as an optional claim on the app registration so
+the token carries the address the user is provisioned under.
+```
+
+这条消息直接点明了怎么改。视租户配置而定，可能还需要为 `email` claim 授予管理员同意（admin consent），
+或配置一个已验证域名，Entra 才会真正下发它。
+
+### 3. 用户必须已在 UC 中存在 —— 没有 JIT 自动开通
+
+UC 不会在首次登录时自动建用户。请先通过 SCIM 在 UC 里开通每个用户，用的地址要与 `email` claim 携带的
+**完全一致**。能解析出邮箱但未开通的主体会报 `User not provisioned: <email>` —— 与上面缺 claim 的消息
+明显不同，一眼就能分清是"改应用注册"还是"开通这个用户"。
+
+### 4. 在 `uc.env` 里配这三个值
+
+```
+UC_ENTRA_TENANT_ID=<directory-tenant-id>
+UC_CLIENT_ID=<application-client-id>
+UC_CLIENT_SECRET=<client-secret-value>
+```
+
+改完要**重启 UC** 才生效（与 JWKS 文件不同，这几项是启动快照，不热加载）。`deploy-uc.sh` 会从 tenant id
+自动推导 CLI 用的 authorization / token URL
+（`https://login.microsoftonline.com/<tenant>/oauth2/v2.0/{authorize,token}`），只有要覆盖它们时才自己设
+`UC_AUTHORIZATION_URL` / `UC_TOKEN_URL`。
+
+**`UC_ALLOWED_ISSUERS` 不需要加 Entra 的 issuer。** 设了 `UC_ENTRA_TENANT_ID` 后，服务端会自动推导出
+`https://login.microsoftonline.com/<tenant>/v2.0` 并信任它，同时接受 `UC_CLIENT_ID` 作为 audience；这些
+都是在 JWKS 文件与 `UC_ALLOWED_ISSUERS` 已有内容之上取并集。`UC_ALLOWED_ISSUERS` 保持上文写的样子即可。
+
+### 5. 与静态 JWKS 文件共存
+
+两个受信来源是**按 issuer 分流**的，不是按"有没有 JWKS 文件"来分：静态文件（`UC_EXTERNAL_JWKS_FILE`）
+只对它**声明过**的 issuer（即各 key 的 `issuer` 成员）有效；其它 issuer —— 包括 Entra —— 一律走 OIDC
+discovery。所以一套部署可以同时跑 DWSU token-exchange 和 Entra 登录，
+[DWSU 在线接入流程](#接入新-dwsu在线热生效无需重启)完全不受影响。
+
+两者在实现上也有意不同：JWKS 文件每次验签都现读（不缓存，所以新追加的 DWSU key 不重启即刻生效）；而对
+Entra，服务端按 issuer 把**构建好的 key provider** 缓存 24 小时 —— 缓存的不只是 discovery 文档 —— 所以
+正常情况下一次 token 交换既不会重新拉 discovery 文档，也不会重新拉 Entra 的 JWKS。底层的 key 查询另有
+每 issuer 每分钟 10 次的限流。每次**真正发生**的 discovery 拉取都会打一条 `info` 日志
+（`resolving keys by OIDC discovery`，每个 issuer 每个缓存周期一条，不是每次交换一条），在出厂默认的
+`rootLogger.level = info` 下就能看到：某个 issuer 只出现一次、之后不再出现，就说明缓存是生效的。
+
+当**配置了 `UC_EXTERNAL_JWKS_FILE`**、却有 issuer 回退到 discovery 时，服务端还会打一条 `warn`，写明是
+哪个 issuer、哪个文件。对 DWSU 的 issuer，这就是它 JWK 的 `issuer` 成员与 token 的 `iss` 对不上的信号
+（写错一个字符就会被静默改走 discovery，然后在那边失败）；而在混合部署里 Entra 的 issuer 出现这条属于
+预期之内，可以忽略。
+
+### 6. 网络要求
+
+UC 需要能出网访问 `login.microsoftonline.com`（HTTPS），用于拉取 Entra 的 OIDC discovery 文档和 JWKS。
+若该端点不可达、返回非 2xx，或 key 查询被限流，token 交换返回 **503**（`UNAVAILABLE`）而不是 401 ——
+上游故障按故障报，不会当成 token 被拒。discovery 请求超过 5 秒超时则返回 **504**（`DEADLINE_EXCEEDED`）。
+只有确实找不到签名 key（`kid` 连 Entra 自己都不认）才仍然是 401。
+
 ## 故障排查
 
 | 现象 | 原因 / 处理 |
