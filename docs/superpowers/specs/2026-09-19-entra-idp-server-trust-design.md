@@ -143,12 +143,31 @@ The two resolution paths have opposite requirements and are treated differently.
 
 - **File path:** stays `.cached(false)`. This is what makes appending a DWSU key take effect
   without a restart.
-- **Discovery path:** the resolved `jwks_uri` is cached per issuer, and the `JwkProvider` is built
-  with `.cached(...)` and `.rateLimited(...)`. Starting values, fixed in code rather than made
-  configurable until there is a reason: key cache of 10 entries with a 24-hour TTL, rate limit of
-  10 fetches per minute, discovery-document TTL of 24 hours, and a 5-second HTTP timeout on both
-  the discovery and JWKS fetches. A cache miss on an unknown `kid` still triggers a fetch, which is
-  what makes key rotation work; the rate limit is what stops that being abused.
+- **Discovery path:** the built `JwkProvider` itself is cached per issuer, keyed by the normalized
+  issuer, with a TTL. `JwkProviderBuilder.build()` returns three fresh objects on every call:
+  `new GuavaCachedJwkProvider(new RateLimitedJwkProvider(new UrlJwkProvider(...), bucket), cacheSize, expiresIn)`.
+  The key cache lives in the outer `GuavaCachedJwkProvider`, the token bucket in the middle
+  `RateLimitedJwkProvider`. Caching the built provider itself, not just the resolved `jwks_uri`,
+  is what lets that cache and bucket persist across exchanges: a cache hit
+  within the TTL returns the same provider without re-running discovery, so its internal key cache
+  and rate limiter see repeated use across calls instead of starting empty and full each time. A
+  cache miss re-runs discovery and builds a new provider with fresh `.cached(...)` and
+  `.rateLimited(...)` settings. Starting values, fixed in code rather than made configurable until
+  there is a reason: key cache of 10 entries with a 24-hour TTL, rate limit of 10 fetches per
+  minute, a 24-hour TTL on the cached provider itself, and a 5-second HTTP timeout on both the
+  discovery and JWKS fetches. A cache miss on an unknown `kid` still triggers a live fetch, which is
+  what makes key rotation work; the rate limit is what stops that being abused. A failed
+  resolution — non-200, timeout, malformed discovery document — is never cached, so the next
+  exchange retries instead of being stuck behind a cached failure.
+
+> **Correction (post-implementation).** This section originally specified caching only the
+> resolved `jwks_uri` per issuer while rebuilding the `JwkProvider` on every call. That did not
+> work: `JwkProviderBuilder.build()` constructs a fresh cache and a fresh rate-limit bucket on
+> every call, so a per-call build gave every exchange an empty key cache and a full bucket and
+> still made a live HTTP fetch — the `.cached(...)` and `.rateLimited(...)` settings were present
+> but inert, and this section's own stated goal of removing the per-exchange round trip to
+> Microsoft was not met. The design above is the correction, made during implementation: cache the
+> built provider itself, per issuer, with a TTL.
 
 ### 4. Failure modes and status codes
 
