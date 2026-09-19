@@ -1,6 +1,8 @@
 package io.unitycatalog.server.exception;
 
 import com.auth0.jwk.JwkException;
+import com.auth0.jwk.NetworkException;
+import com.auth0.jwk.RateLimitReachedException;
 import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.linecorp.armeria.common.HttpRequest;
 import com.linecorp.armeria.common.HttpResponse;
@@ -33,6 +35,25 @@ public class GlobalExceptionHandler implements ExceptionHandlerFunction {
           HttpStatus.UNAUTHORIZED,
           createErrorResponse(
               ErrorCode.UNAUTHENTICATED, "Invalid access token.", cause, new HashMap<>()));
+    } else if (cause instanceof NetworkException) {
+      // NetworkException extends SigningKeyNotFoundException, so it must be checked before the
+      // generic JwkException branch below. The identity provider being unreachable is an upstream
+      // outage, not a rejected token, and the caller should retry rather than discard credentials.
+      return HttpResponse.ofJson(
+          HttpStatus.SERVICE_UNAVAILABLE,
+          createErrorResponse(
+              ErrorCode.UNAVAILABLE,
+              "Could not reach the identity provider to fetch signing keys.",
+              cause,
+              new HashMap<>()));
+    } else if (cause instanceof RateLimitReachedException) {
+      return HttpResponse.ofJson(
+          HttpStatus.SERVICE_UNAVAILABLE,
+          createErrorResponse(
+              ErrorCode.UNAVAILABLE,
+              "Too many signing-key lookups; retry shortly.",
+              cause,
+              new HashMap<>()));
     } else if (cause instanceof JwkException) {
       // JWKS lookup failures (e.g. SigningKeyNotFoundException when the JWT's kid is not present in
       // the JWKS) are checked exceptions from com.auth0.jwk -- a sibling hierarchy of the
