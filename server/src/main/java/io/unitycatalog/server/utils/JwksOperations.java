@@ -11,6 +11,7 @@ import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.algorithms.Algorithm;
 import com.auth0.jwt.interfaces.Verification;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -126,18 +127,18 @@ public class JwksOperations {
       Path certsFile = securityContext.getCertsFile();
       return new JwkProviderBuilder(certsFile.toUri().toURL()).cached(false).build();
     } else {
-      // Trusted external issuers (e.g. Relyt instances doing token-exchange) are bare
-      // identifiers, not OIDC providers: their public keys are registered locally in a static
-      // JWKS file instead of being discovered over the network. Because a single file can hold
-      // keys for multiple issuers, each JWK must carry an "issuer" member and a key is only
-      // accepted for the issuer it was registered to (see IssuerScopedJwkProvider) — otherwise
-      // one registered instance could sign tokens accepted as another allowlisted issuer.
-
-      // Route per issuer. The static file is authoritative only for the issuers it DECLARES (each
-      // key carries an "issuer" member; see IssuerScopedJwkProvider). Anything else -- notably
-      // Microsoft Entra ID, whose keys rotate and cannot live in a hand-maintained file -- is
-      // resolved by OIDC discovery. Testing "does the file declare this issuer" rather than "does
-      // the file exist" is what makes the two trust sources coexist in one deployment.
+      // Route per issuer. The static JWKS file is authoritative only for the issuers it DECLARES
+      // (each key carries an "issuer" member; see IssuerScopedJwkProvider). Those file-held
+      // issuers (e.g. Relyt instances doing token-exchange) are bare identifiers, not OIDC
+      // providers: their public keys are registered locally instead of being discovered over the
+      // network. Because a single file can hold keys for multiple issuers, a key is only accepted
+      // for the issuer it was registered to — otherwise one registered instance could sign tokens
+      // accepted as another allowlisted issuer.
+      //
+      // Every other issuer -- notably Microsoft Entra ID, whose keys rotate and cannot live in a
+      // hand-maintained file -- is resolved by OIDC discovery. Testing "does the file declare this
+      // issuer" rather than "does the file exist" is what makes the two trust sources coexist in
+      // one deployment.
       if (knownIssuers().contains(issuer)) {
         Path jwksPath = Path.of(serverProperties.getExternalJwksFile());
         LOGGER.debug("Issuer '{}': resolving keys from static JWKS file '{}'", issuer, jwksPath);
@@ -145,8 +146,6 @@ public class JwksOperations {
             new JwkProviderBuilder(jwksPath.toUri().toURL()).cached(false).build();
         return new IssuerScopedJwkProvider(fileProvider, issuer);
       }
-
-      LOGGER.debug("Issuer '{}': resolving keys by OIDC discovery", issuer);
 
       String normalizedIssuer =
           issuer.startsWith("https://") || issuer.startsWith("http://")
@@ -157,6 +156,25 @@ public class JwksOperations {
       if (cached != null
           && Duration.between(cached.fetchedAt(), Instant.now()).compareTo(DISCOVERY_TTL) < 0) {
         return cached.provider();
+      }
+
+      // Below the cache-hit return, so this fires on an actual discovery fetch only -- at most
+      // once per issuer per DISCOVERY_TTL. That is what makes INFO affordable here, and what lets
+      // an operator confirm caching works by seeing the line once rather than per exchange.
+      LOGGER.info("Issuer '{}': resolving keys by OIDC discovery", issuer);
+      String externalJwksFile =
+          serverProperties != null ? serverProperties.getExternalJwksFile() : null;
+      if (externalJwksFile != null && !externalJwksFile.isBlank()) {
+        // A JWKS file is configured but does not declare this issuer. For an issuer that is
+        // supposed to be file-held, a typo'd "issuer" member is exactly how it silently reroutes
+        // to discovery; without this line the operator has nothing to go on. For Entra in a mixed
+        // deployment the fallback is expected -- hence a warning, not a failure.
+        LOGGER.warn(
+            "Issuer '{}' is not declared in the external JWKS file '{}', so its keys are being"
+                + " resolved by OIDC discovery. If this issuer's keys are meant to come from the"
+                + " file, check the 'issuer' member of its JWK entries.",
+            issuer,
+            externalJwksFile);
       }
 
       // Get the JWKS from the OIDC well-known location described here
@@ -178,7 +196,8 @@ public class JwksOperations {
         if (e.getCause() instanceof ResponseTimeoutException) {
           throw new OAuthInvalidRequestException(
               ErrorCode.DEADLINE_EXCEEDED,
-              "Timed out fetching the OIDC configuration for issuer " + normalizedIssuer);
+              "Timed out fetching the OIDC configuration for issuer " + normalizedIssuer,
+              e);
         }
         throw new OAuthInvalidRequestException(
             ErrorCode.UNAVAILABLE,
@@ -196,8 +215,19 @@ public class JwksOperations {
 
       String response = discoveryResponse.contentUtf8();
 
-      // TODO: We should cache this. No need to fetch it each time.
-      Map<String, Object> configMap = mapper.readValue(response, new TypeReference<>() {});
+      // A 200 with a body that is not a JSON object is an upstream failure like any other, not a
+      // programming error: without this the Jackson IOException escapes through @SneakyThrows,
+      // matches no GlobalExceptionHandler branch, and surfaces as a bodyless HTTP 500.
+      Map<String, Object> configMap;
+      try {
+        configMap = mapper.readValue(response, new TypeReference<>() {});
+      } catch (JsonProcessingException e) {
+        throw new OAuthInvalidRequestException(
+            ErrorCode.UNAVAILABLE,
+            "Identity provider returned a malformed OIDC configuration for issuer "
+                + normalizedIssuer,
+            e);
+      }
 
       if (configMap == null || configMap.isEmpty()) {
         throw new OAuthInvalidRequestException(ErrorCode.UNAVAILABLE,
@@ -207,7 +237,9 @@ public class JwksOperations {
       String configIssuer = (String) configMap.get("issuer");
       String configJwksUri = (String) configMap.get("jwks_uri");
 
-      if (!configIssuer.equals(normalizedIssuer)) {
+      // Null when the document has no "issuer" member at all -- a mismatch like any other, and
+      // checked explicitly so a malformed document cannot NPE its way to a bodyless 500.
+      if (configIssuer == null || !configIssuer.equals(normalizedIssuer)) {
         throw new OAuthInvalidRequestException(ErrorCode.ABORTED,
             "Issuer doesn't match configuration");
       }

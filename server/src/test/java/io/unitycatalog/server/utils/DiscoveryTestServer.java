@@ -24,6 +24,7 @@ public final class DiscoveryTestServer implements AutoCloseable {
   private final AtomicInteger jwksHits = new AtomicInteger();
   private volatile HttpStatus discoveryStatus = HttpStatus.OK;
   private volatile Duration discoveryDelay = Duration.ZERO;
+  private volatile String discoveryBody = null;
 
   public DiscoveryTestServer(String jwksJson) {
     this.jwksJson = jwksJson;
@@ -34,9 +35,11 @@ public final class DiscoveryTestServer implements AutoCloseable {
                 "/.well-known/openid-configuration",
                 (ctx, req) -> {
                   discoveryHits.incrementAndGet();
+                  String body = discoveryBody;
                   HttpResponse response =
                       discoveryStatus.equals(HttpStatus.OK)
-                          ? HttpResponse.of(MediaType.JSON, discoveryDocument())
+                          ? HttpResponse.of(
+                              MediaType.JSON, body != null ? body : discoveryDocument())
                           : HttpResponse.of(discoveryStatus);
                   // Delayed rather than slept: the handler runs on an event loop and must not
                   // block.
@@ -66,6 +69,14 @@ public final class DiscoveryTestServer implements AutoCloseable {
   /** Make subsequent discovery requests fail with the given status. */
   public void failDiscoveryWith(HttpStatus status) {
     this.discoveryStatus = status;
+  }
+
+  /**
+   * Serve this exact body with a 200 instead of the generated discovery document, to exercise a
+   * malformed but successful discovery response.
+   */
+  public void serveDiscoveryBody(String body) {
+    this.discoveryBody = body;
   }
 
   /** Delay subsequent discovery responses, to exercise the client-side timeout. */

@@ -150,6 +150,37 @@ public class JwksOperationsTest {
   }
 
   @Test
+  public void malformedDiscoveryDocumentIsReportedAsUnavailable() throws Exception {
+    // A 200 whose body is not JSON at all (a captive portal or proxy error page). The Jackson
+    // parse failure must become an upstream-failure 503, not a bodyless 500.
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.serveDiscoveryBody("<html><body>not json</body></html>");
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void discoveryDocumentWithoutIssuerMemberIsRejected() throws Exception {
+    // A well-formed JSON object with no "issuer" member used to NPE on the null cast result.
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.serveDiscoveryBody("{\"jwks_uri\":\"" + idp.issuer() + "/keys\"}");
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.ABORTED);
+    }
+  }
+
+  @Test
   public void discoveryTimeoutIsReportedAsDeadlineExceeded() throws Exception {
     // Takes ~5 seconds by design: the timeout is a fixed constant, so the test waits it out rather
     // than reaching into the class to shorten it.
