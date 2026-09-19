@@ -223,12 +223,16 @@ public class JwksOperations {
           issuer,
           resolved.location(),
           cause);
+      // Deliberately generic. This is reached from AuthDecorator on every authenticated route,
+      // and any garbage bearer token gets there, so the caller is effectively unauthenticated:
+      // naming the file would hand out a server filesystem path, and cause.getMessage() carries
+      // that same path inside auth0's "Cannot obtain jwks from url file:/..." wording. The
+      // operator loses nothing -- the ERROR above has the path and the cause.
       return new BaseException(
           ErrorCode.INTERNAL,
-          String.format(
-              "Could not read the signing keys for issuer '%s' from '%s': %s. This is a server"
-                  + " configuration problem, not a problem with the token.",
-              issuer, resolved.location(), cause.getMessage()),
+          "The server could not read its configured signing keys. This is a server"
+              + " key-configuration problem, not a problem with the token; see the server logs"
+              + " for details.",
           cause);
     }
     if (remoteKeyFetchWarnCooldown.allow(issuer)) {

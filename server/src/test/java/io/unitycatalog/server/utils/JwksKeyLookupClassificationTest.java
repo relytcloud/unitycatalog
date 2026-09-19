@@ -73,16 +73,26 @@ public class JwksKeyLookupClassificationTest {
   }
 
   @Test
-  public void missingInternalCertsFileIsAServerFaultThatNamesTheFile() {
+  public void missingInternalCertsFileIsAServerFaultThatLeaksNoPath() {
     // The whole authenticated API surface resolves INTERNAL through this provider on every call.
     // Deleting the file, or mounting it with the wrong mode, is a server misconfiguration: it is
     // not an upstream outage and it is not the caller's token that is wrong.
+    //
+    // The message goes to a caller who only had to present SOME bearer token to get here, so it
+    // must not name the file. The path is in the server-side ERROR log with the cause, which is
+    // where the operator reads it.
     Path missing = Path.of("/no/such/dir/uc-certs-for-this-test.json");
     JwksOperations ops = opsWithCertsFile(missing);
 
     assertThatThrownBy(() -> ops.verifierForIssuerAndKey(INTERNAL, "any-kid", "RS256", List.of()))
         .isInstanceOf(BaseException.class)
-        .hasMessageContaining(missing.toString())
+        .hasMessageNotContaining(missing.toString())
+        .hasMessageNotContaining("/no/such/dir")
+        // Nor via auth0's own wording, which embeds the file: URL it failed to open.
+        .hasMessageNotContaining("file:")
+        // Still says whose fault it is, and where to look.
+        .hasMessageContaining("server key-configuration problem")
+        .hasMessageContaining("server logs")
         // Nothing upstream was contacted, so nothing upstream may be blamed.
         .hasMessageNotContaining("identity provider")
         .extracting(e -> ((BaseException) e).getErrorCode())
@@ -103,16 +113,19 @@ public class JwksKeyLookupClassificationTest {
   }
 
   @Test
-  public void malformedStaticJwksFileIsAServerFaultThatNamesTheFile() throws Exception {
+  public void malformedStaticJwksFileIsAServerFaultThatLeaksNoPath() throws Exception {
     // The key entry declares its issuer -- so resolution routes to the file -- but carries no
     // "kty", which is what Jwk.fromValues rejects. The key set cannot be produced at all, so no
-    // statement about the caller's kid is possible.
+    // statement about the caller's kid is possible. As above, the caller is told what kind of
+    // problem it is and nothing about where the file lives.
     Path jwksFile = fileWith("{\"keys\":[{\"kid\":\"kidA\",\"issuer\":\"issuer-a\"}]}");
     JwksOperations ops = opsWithJwksFile(jwksFile);
 
     assertThatThrownBy(() -> ops.verifierForIssuerAndKey("issuer-a", "kidA", "ES256", List.of()))
         .isInstanceOf(BaseException.class)
-        .hasMessageContaining(jwksFile.toString())
+        .hasMessageNotContaining(jwksFile.toString())
+        .hasMessageNotContaining(jwksFile.getParent().toString())
+        .hasMessageContaining("server key-configuration problem")
         .extracting(e -> ((BaseException) e).getErrorCode())
         .isEqualTo(ErrorCode.INTERNAL);
   }

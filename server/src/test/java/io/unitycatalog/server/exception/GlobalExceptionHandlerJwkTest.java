@@ -64,19 +64,21 @@ public class GlobalExceptionHandlerJwkTest {
   }
 
   @Test
-  public void localKeyFileFaultIsRenderedAsAServerFaultNamingTheFile() {
-    // The shape JwksOperations now produces for a missing or unreadable certs.json.
+  public void localKeyFileFaultIsRenderedAsAServerFaultWithoutNamingTheFile() {
+    // The shape JwksOperations now produces for a missing or unreadable certs.json. The file is
+    // named in the server-side ERROR log only: this body reaches anyone who presented a bearer
+    // token, so it must not disclose a server filesystem path.
     AggregatedHttpResponse response =
         responseFor(
             new BaseException(
                 ErrorCode.INTERNAL,
-                "Could not read the signing keys for issuer 'internal' from"
-                    + " '/opt/uc/etc/conf/certs.json': Cannot obtain jwks from url"
-                    + " file:/opt/uc/etc/conf/certs.json. This is a server configuration problem,"
-                    + " not a problem with the token."));
+                "The server could not read its configured signing keys. This is a server"
+                    + " key-configuration problem, not a problem with the token; see the server"
+                    + " logs for details."));
 
     assertThat(response.status()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
-    assertThat(response.contentUtf8()).contains("/opt/uc/etc/conf/certs.json");
+    assertThat(response.contentUtf8()).contains("server key-configuration problem");
+    assertThat(response.contentUtf8()).doesNotContain("/opt/uc/etc/conf/certs.json");
     // A 503 here tells every load balancer and client to retry a condition that never clears.
     assertThat(response.status()).isNotEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
   }
