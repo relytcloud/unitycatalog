@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -31,6 +32,13 @@ import org.slf4j.LoggerFactory;
 public class ServerProperties {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(ServerProperties.class);
+
+  /**
+   * Fixed Microsoft Entra ID authority. Sovereign clouds (Azure China, US Gov) are deliberately
+   * unsupported; deployments are on the global cloud.
+   */
+  private static final String ENTRA_AUTHORITY = "https://login.microsoftonline.com";
+
   private final Properties properties = new Properties(generateDefaults());
 
   /** Validator interface for property values */
@@ -508,7 +516,7 @@ public class ServerProperties {
    * @return List of allowed issuer URLs (exact match required)
    */
   public List<String> getAllowedIssuers() {
-    return getCommaSeparatedList("server.allowed-issuers");
+    return unionWithDerived(getCommaSeparatedList("server.allowed-issuers"), getEntraIssuer());
   }
 
   /**
@@ -520,7 +528,45 @@ public class ServerProperties {
    * @return List of expected audience values
    */
   public List<String> getAudiences() {
-    return getCommaSeparatedList("server.audiences");
+    // The client id is only an accepted audience when an Entra tenant is configured; it exists
+    // upstream for the CLI's authorization-code flow and must not widen trust on its own.
+    String entraAudience = getEntraIssuer() == null ? null : getProperty("server.client-id");
+    return unionWithDerived(getCommaSeparatedList("server.audiences"), entraAudience);
+  }
+
+  /**
+   * Microsoft Entra ID tenant id. When set, the Entra issuer and audience are derived from it and
+   * unioned into {@link #getAllowedIssuers()} and {@link #getAudiences()}. When unset, nothing is
+   * derived and trust is exactly what the file configures.
+   */
+  public String getEntraTenantId() {
+    return getProperty("server.entra.tenant-id");
+  }
+
+  /**
+   * The Entra v2.0 issuer derived from {@code server.entra.tenant-id}, or null when no tenant is
+   * configured. This is the exact string Entra puts in the {@code iss} claim of a v2.0 token.
+   */
+  public String getEntraIssuer() {
+    String tenantId = getEntraTenantId();
+    if (tenantId == null || tenantId.isBlank()) {
+      return null;
+    }
+    return ENTRA_AUTHORITY + "/" + tenantId.trim() + "/v2.0";
+  }
+
+  /**
+   * Union a configured list with a derived value. The derived value is appended only when it is
+   * present and not already configured, so derivation composes with explicit configuration rather
+   * than replacing it.
+   */
+  private static List<String> unionWithDerived(List<String> configured, String derived) {
+    if (derived == null || derived.isBlank() || configured.contains(derived)) {
+      return configured;
+    }
+    List<String> combined = new ArrayList<>(configured);
+    combined.add(derived);
+    return List.copyOf(combined);
   }
 
   /**
