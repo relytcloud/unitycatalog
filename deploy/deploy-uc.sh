@@ -9,7 +9,21 @@
 # nothing is lost on restart.
 #
 # Env overrides: UC_ENV_FILE (default ./uc.env). Extra args are passed through to start-uc-server.
+# --render-only renders the config and exits without starting the server.
 set -euo pipefail
+
+# Pull --render-only out of the args before anything else touches them: it must set UC_RENDER_ONLY
+# but never itself reach start-uc-server. (The ${args[@]+...} form, not a bare "${args[@]}", is
+# needed because bash 3.2 under `set -u` treats an empty array's expansion as unbound.)
+UC_RENDER_ONLY="${UC_RENDER_ONLY:-}"
+args=()
+for a in "$@"; do
+  case "$a" in
+    --render-only) UC_RENDER_ONLY=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- "${args[@]+"${args[@]}"}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${UC_ENV_FILE:-$HERE/uc.env}"
@@ -40,6 +54,19 @@ set -a; . "$ENV_FILE"; set +a
 : "${UC_ALLOWED_ISSUERS:=}"                       # blank = trust only the issuers derived from the JWKS
 : "${UC_PORT:=8088}"                              # matches bin/start-uc-with-ui.sh and the e2e suites
 
+# Derive the Entra OAuth endpoints from the tenant id unless explicitly overridden. These are
+# consumed by the CLI, which reads the rendered server.properties directly, so they must be real
+# values in the file rather than derived inside the server.
+if [ -n "${UC_ENTRA_TENANT_ID:-}" ]; then
+  UC_AUTHORIZATION_URL="${UC_AUTHORIZATION_URL:-https://login.microsoftonline.com/${UC_ENTRA_TENANT_ID}/oauth2/v2.0/authorize}"
+  UC_TOKEN_URL="${UC_TOKEN_URL:-https://login.microsoftonline.com/${UC_ENTRA_TENANT_ID}/oauth2/v2.0/token}"
+fi
+UC_ENTRA_TENANT_ID="${UC_ENTRA_TENANT_ID:-}"
+UC_CLIENT_ID="${UC_CLIENT_ID:-}"
+UC_CLIENT_SECRET="${UC_CLIENT_SECRET:-}"
+UC_AUTHORIZATION_URL="${UC_AUTHORIZATION_URL:-}"
+UC_TOKEN_URL="${UC_TOKEN_URL:-}"
+
 # Validate required values (paths are derived, so only real config/secrets are required).
 missing=0
 for v in UC_HOME ALIYUN_REGION ALIYUN_ACCESS_KEY ALIYUN_SECRET_KEY ALIYUN_MASTER_ROLE_ARN \
@@ -54,6 +81,7 @@ done
 
 # Substitute ${VAR} placeholders in a template -> output file (only the known keys).
 export UC_AUTHORIZATION UC_ALLOWED_ISSUERS UC_EXTERNAL_JWKS_FILE UC_AUDIENCES UC_ACCESS_TOKEN_TTL \
+       UC_ENTRA_TENANT_ID UC_CLIENT_ID UC_CLIENT_SECRET UC_AUTHORIZATION_URL UC_TOKEN_URL \
        ALIYUN_REGION ALIYUN_ACCESS_KEY ALIYUN_SECRET_KEY ALIYUN_MASTER_ROLE_ARN UC_DB_FILE
 render() {
   local tpl="$1" out="$2"
@@ -62,8 +90,9 @@ render() {
 import os, sys
 tpl, out = sys.argv[1], sys.argv[2]
 keys = ["UC_AUTHORIZATION", "UC_ALLOWED_ISSUERS", "UC_EXTERNAL_JWKS_FILE", "UC_AUDIENCES",
-        "UC_ACCESS_TOKEN_TTL", "ALIYUN_REGION", "ALIYUN_ACCESS_KEY", "ALIYUN_SECRET_KEY",
-        "ALIYUN_MASTER_ROLE_ARN", "UC_DB_FILE"]
+        "UC_ACCESS_TOKEN_TTL", "UC_ENTRA_TENANT_ID", "UC_CLIENT_ID", "UC_CLIENT_SECRET",
+        "UC_AUTHORIZATION_URL", "UC_TOKEN_URL", "ALIYUN_REGION", "ALIYUN_ACCESS_KEY",
+        "ALIYUN_SECRET_KEY", "ALIYUN_MASTER_ROLE_ARN", "UC_DB_FILE"]
 s = open(tpl, encoding="utf-8").read()
 for k in keys:
     s = s.replace("${%s}" % k, os.environ.get(k, ""))
@@ -73,10 +102,26 @@ PY
 
 render "$SP_TEMPLATE" "$UC_SERVER_PROPERTIES"
 render "$HB_TEMPLATE" "$UC_HIBERNATE_PROPERTIES"
+
+# A placeholder that survives rendering means a key is missing from the lists above. Left alone it
+# would be read by the server as a literal value, so fail loudly instead.
+for rendered in "$UC_SERVER_PROPERTIES" "$UC_HIBERNATE_PROPERTIES"; do
+  if grep -q '\${' "$rendered"; then
+    echo "ERROR: unsubstituted placeholder in $rendered:" >&2
+    grep -n '\${' "$rendered" >&2
+    exit 1
+  fi
+done
+
 mkdir -p "$(dirname "$UC_DB_FILE")"   # ensure the H2 dir exists under UC_HOME
 echo "Rendered:"
 echo "  server.properties    -> $UC_SERVER_PROPERTIES (contains real secrets; do not commit)"
 echo "  hibernate.properties -> $UC_HIBERNATE_PROPERTIES (H2 at $UC_DB_FILE)"
+
+if [ "${UC_RENDER_ONLY:-}" = "1" ]; then
+  echo "Render-only mode: not starting the server."
+  exit 0
+fi
 
 # Start UC server (foreground). Extra args are passed through; an explicit -p/--port in "$@" wins
 # (commons-cli keeps the FIRST occurrence, so we must not append our default after a user-supplied one).
