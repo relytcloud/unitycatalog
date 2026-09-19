@@ -64,11 +64,50 @@ public class JwksOperationsTest {
 
   @Test
   public void keyWithoutIssuerMemberIsRejected() throws Exception {
-    String jwks = "{\"keys\":[" + entry("kidNoIssuer", X_A, Y_A, null) + "]}";
+    // kidA declares issuer-a, so resolution routes to the file. The key with no "issuer" member
+    // must still be refused for that issuer.
+    String jwks =
+        "{\"keys\":["
+            + entry("kidA", X_A, Y_A, "issuer-a")
+            + ","
+            + entry("kidNoIssuer", X_B, Y_B, null)
+            + "]}";
 
     JwkProvider provider = providerFor("issuer-a", jwks);
 
     assertThatThrownBy(() -> provider.get("kidNoIssuer")).isInstanceOf(JwkException.class);
+  }
+
+  @Test
+  public void issuerDeclaredInTheFileResolvesFromTheFile() throws Exception {
+    // A reachable discovery server exists for this issuer, but the file declares it, so the file
+    // wins and no discovery request is made.
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + entry("kidRemote", X_B, Y_B, null) + "]}")) {
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, idp.issuer()) + "]}");
+
+      JwkProvider provider = ops.loadJwkProvider(idp.issuer());
+
+      assertThat(provider.get("kidLocal").getId()).isEqualTo("kidLocal");
+      assertThat(idp.discoveryHits()).isZero();
+    }
+  }
+
+  @Test
+  public void issuerNotDeclaredInTheFileResolvesByDiscovery() throws Exception {
+    // The file exists and declares a different issuer. Under the old all-or-nothing behavior this
+    // issuer would have been forced through the file and failed; it must reach discovery.
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + entry("kidRemote", X_B, Y_B, null) + "]}")) {
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      JwkProvider provider = ops.loadJwkProvider(idp.issuer());
+
+      assertThat(provider.get("kidRemote").getId()).isEqualTo("kidRemote");
+      assertThat(idp.discoveryHits()).isEqualTo(1);
+    }
   }
 
   private JwksOperations opsForJwks(String jwksJson) throws Exception {

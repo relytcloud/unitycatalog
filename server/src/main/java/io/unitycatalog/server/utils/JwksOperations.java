@@ -105,18 +105,21 @@ public class JwksOperations {
       // keys for multiple issuers, each JWK must carry an "issuer" member and a key is only
       // accepted for the issuer it was registered to (see IssuerScopedJwkProvider) — otherwise
       // one registered instance could sign tokens accepted as another allowlisted issuer.
-      String externalJwksFile =
-          serverProperties != null ? serverProperties.getExternalJwksFile() : null;
-      if (externalJwksFile != null && !externalJwksFile.isBlank()) {
-        Path jwksPath = Path.of(externalJwksFile);
-        if (Files.exists(jwksPath)) {
-          LOGGER.debug("Using static external JWKS file '{}' for issuer '{}'", jwksPath, issuer);
-          JwkProvider fileProvider =
-              new JwkProviderBuilder(jwksPath.toUri().toURL()).cached(false).build();
-          return new IssuerScopedJwkProvider(fileProvider, issuer);
-        }
-        LOGGER.warn("Configured external JWKS file '{}' does not exist", jwksPath);
+
+      // Route per issuer. The static file is authoritative only for the issuers it DECLARES (each
+      // key carries an "issuer" member; see IssuerScopedJwkProvider). Anything else -- notably
+      // Microsoft Entra ID, whose keys rotate and cannot live in a hand-maintained file -- is
+      // resolved by OIDC discovery. Testing "does the file declare this issuer" rather than "does
+      // the file exist" is what makes the two trust sources coexist in one deployment.
+      if (knownIssuers().contains(issuer)) {
+        Path jwksPath = Path.of(serverProperties.getExternalJwksFile());
+        LOGGER.debug("Issuer '{}': resolving keys from static JWKS file '{}'", issuer, jwksPath);
+        JwkProvider fileProvider =
+            new JwkProviderBuilder(jwksPath.toUri().toURL()).cached(false).build();
+        return new IssuerScopedJwkProvider(fileProvider, issuer);
       }
+
+      LOGGER.debug("Issuer '{}': resolving keys by OIDC discovery", issuer);
 
       // Get the JWKS from the OIDC well-known location described here
       // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
