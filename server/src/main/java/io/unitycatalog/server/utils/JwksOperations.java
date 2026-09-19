@@ -2,10 +2,13 @@ package io.unitycatalog.server.utils;
 
 import static io.unitycatalog.server.security.SecurityContext.Issuers.INTERNAL;
 
+import com.auth0.jwk.InvalidPublicKeyException;
 import com.auth0.jwk.Jwk;
 import com.auth0.jwk.JwkException;
 import com.auth0.jwk.JwkProvider;
 import com.auth0.jwk.JwkProviderBuilder;
+import com.auth0.jwk.NetworkException;
+import com.auth0.jwk.RateLimitReachedException;
 import com.auth0.jwk.SigningKeyNotFoundException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTVerifier;
@@ -18,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.linecorp.armeria.client.ResponseTimeoutException;
 import com.linecorp.armeria.client.WebClient;
 import com.linecorp.armeria.common.AggregatedHttpResponse;
+import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.exception.OAuthInvalidClientException;
 import io.unitycatalog.server.exception.OAuthInvalidRequestException;
@@ -115,13 +119,59 @@ public class JwksOperations {
     this.serverProperties = serverProperties;
   }
 
-  @SneakyThrows
+  /**
+   * Where a key set comes from. This is the one fact that decides how failing to obtain it should
+   * be reported, and it is known only where the provider is built -- {@link #resolveJwkProvider}
+   * routes between three sources. Carrying it to the catch site is what keeps the routing decision
+   * from being re-derived, and eventually drifting, somewhere downstream.
+   */
+  private enum KeySource {
+    /** The server's own certs.json, written at startup by {@link SecurityContext}. */
+    INTERNAL_CERTS,
+    /** The static external JWKS file named by {@code server.external-jwks-file}. */
+    EXTERNAL_JWKS_FILE,
+    /** An identity provider's JWKS endpoint, found by OIDC discovery. */
+    DISCOVERY;
+
+    /** Whether the keys live in a file this server owns, rather than somewhere upstream. */
+    boolean isLocalFile() {
+      return this != DISCOVERY;
+    }
+  }
+
+  /**
+   * A provider together with the provenance of the keys it serves. {@code location} is the file
+   * path for a local source and the issuer for a discovered one: it is what an error message names
+   * so an operator knows which thing to go and fix.
+   */
+  private record ResolvedProvider(JwkProvider provider, KeySource source, String location) {}
+
+  /**
+   * jwks-rsa 0.22.1 wordings that mean the KEY SET ITSELF could not be produced, as opposed to
+   * "the key set has no key with this kid". See {@link #keySetWasObtained}. Pinned by {@code
+   * JwksKeyLookupClassificationTest#jwksRsaWordingsTheClassifierDependsOnAreUnchanged}, which
+   * reads them back out of the library.
+   */
+  private static final String NO_KEYS_IN_SET = "No keys found in ";
+
+  private static final String UNPARSEABLE_KEY_SET = "Failed to parse jwk from json";
+
   public JWTVerifier verifierForIssuerAndKey(
       String issuer, String keyId, String alg, List<String> audiences) {
-    JwkProvider jwkProvider = loadJwkProvider(issuer);
-    Jwk jwk = jwkProvider.get(keyId);
+    ResolvedProvider resolved = resolveJwkProvider(issuer);
 
-    Algorithm algorithm = algorithmForJwk(jwk, alg);
+    Algorithm algorithm;
+    try {
+      // Classified here, where the provenance of the key set is still known. Anything further
+      // downstream sees only auth0's exception hierarchy, which cannot express the difference --
+      // see keyLookupFailure.
+      algorithm = algorithmForJwk(resolved.provider().get(keyId), alg);
+    } catch (RateLimitReachedException e) {
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE, "Too many signing-key lookups; retry shortly.", e);
+    } catch (JwkException e) {
+      throw keyLookupFailure(resolved, issuer, e);
+    }
 
     Verification builder = JWT.require(algorithm).withIssuer(issuer);
     if (audiences != null && !audiences.isEmpty()) {
@@ -130,8 +180,83 @@ public class JwksOperations {
     return builder.build();
   }
 
-  @SneakyThrows
-  private Algorithm algorithmForJwk(Jwk jwk, String alg) {
+  /**
+   * Translate an auth0 key-lookup failure into this server's own error, from the PROVENANCE of the
+   * key set rather than the class auth0 threw.
+   *
+   * <p>auth0's hierarchy cannot carry that decision. {@code UrlJwkProvider.getJwks()} fetches
+   * through a plain {@code URLConnection} under a blanket {@code catch (IOException)} that
+   * constructs a {@link NetworkException}, and both local sources here are {@code UrlJwkProvider}s
+   * over {@code file:} URLs. Classifying on {@code NetworkException} therefore reported a deleted
+   * or unreadable certs.json as "could not reach the identity provider": a 503 on every
+   * authenticated API call, with the filename dropped, which load balancers and clients retry
+   * instead of failing fast. Its mirror is an IdP answering 200 with {@code {"keys":[]}}, which is
+   * a plain {@code SigningKeyNotFoundException} and so was reported as a rejected token.
+   */
+  private static BaseException keyLookupFailure(
+      ResolvedProvider resolved, String issuer, JwkException cause) {
+    if (keySetWasObtained(cause)) {
+      // The key set was read and is intact; it just holds no key with this kid. The only
+      // genuinely rejected-token case.
+      return new OAuthInvalidClientException(
+          ErrorCode.UNAUTHENTICATED, "Invalid signing key: " + cause.getMessage(), cause);
+    }
+    if (resolved.source().isLocalFile()) {
+      LOGGER.error(
+          "Issuer '{}': could not read signing keys from local file '{}'",
+          issuer,
+          resolved.location(),
+          cause);
+      return new BaseException(
+          ErrorCode.INTERNAL,
+          String.format(
+              "Could not read the signing keys for issuer '%s' from '%s': %s. This is a server"
+                  + " configuration problem, not a problem with the token.",
+              issuer, resolved.location(), cause.getMessage()),
+          cause);
+    }
+    LOGGER.warn(
+        "Issuer '{}': could not fetch signing keys from the identity provider", issuer, cause);
+    return new OAuthInvalidRequestException(
+        ErrorCode.UNAVAILABLE,
+        "Could not reach the identity provider to fetch the signing keys for issuer " + issuer,
+        cause);
+  }
+
+  /**
+   * Whether the key set itself was obtained, so the only thing that failed is finding the
+   * requested kid in it.
+   *
+   * <p>This is the message-matching option, and a deliberate coupling to jwks-rsa 0.22.1 (pinned
+   * in build.sbt). auth0 throws a plain {@link SigningKeyNotFoundException} for three different
+   * conditions and separates them only by text: {@code "No keys found in <url>"} (a 200 with an
+   * empty "keys" array), {@code "Failed to parse jwk from json"} (an entry that is not a JWK), and
+   * {@code "No key found in <url> with kid <kid>"} (the kid miss). Only the fetch failure is
+   * distinguishable by type, as {@link NetworkException}.
+   *
+   * <p>The match is fail-safe in the direction that matters: an unrecognised wording is read as a
+   * kid miss, which is the 401 this code reported before -- never a new 503 for a token that is
+   * simply wrong. The severe case, a local file that cannot be read, does not depend on this at
+   * all; it is typed.
+   */
+  private static boolean keySetWasObtained(JwkException e) {
+    if (e instanceof NetworkException) {
+      // "Cannot obtain jwks from url ..." -- including, for a file: URL, any IOException at all.
+      return false;
+    }
+    if (!(e instanceof SigningKeyNotFoundException)) {
+      // e.g. InvalidPublicKeyException: a key was selected but its material does not parse, so
+      // the key set is not usable. Not a statement about the caller's kid.
+      return false;
+    }
+    String message = e.getMessage();
+    if (message == null) {
+      return true;
+    }
+    return !message.startsWith(NO_KEYS_IN_SET) && !message.equals(UNPARSEABLE_KEY_SET);
+  }
+
+  private Algorithm algorithmForJwk(Jwk jwk, String alg) throws InvalidPublicKeyException {
     String keyType = jwk.getType();
 
     return switch (keyType) {
@@ -154,14 +279,21 @@ public class JwksOperations {
     };
   }
 
-  @SneakyThrows
   public JwkProvider loadJwkProvider(String issuer) {
+    return resolveJwkProvider(issuer).provider();
+  }
+
+  @SneakyThrows
+  private ResolvedProvider resolveJwkProvider(String issuer) {
     LOGGER.debug("Loading JwkProvider for issuer '{}'", issuer);
     if (issuer.equals(INTERNAL)) {
       // Return our own "self-signed" provider, for easy mode.
       // TODO: This should be configurable
       Path certsFile = securityContext.getCertsFile();
-      return new JwkProviderBuilder(certsFile.toUri().toURL()).cached(false).build();
+      return new ResolvedProvider(
+          new JwkProviderBuilder(certsFile.toUri().toURL()).cached(false).build(),
+          KeySource.INTERNAL_CERTS,
+          certsFile.toString());
     } else {
       // Route per issuer. The static JWKS file is authoritative only for the issuers it DECLARES
       // (each key carries an "issuer" member; see IssuerScopedJwkProvider). Those file-held
@@ -180,7 +312,10 @@ public class JwksOperations {
         LOGGER.debug("Issuer '{}': resolving keys from static JWKS file '{}'", issuer, jwksPath);
         JwkProvider fileProvider =
             new JwkProviderBuilder(jwksPath.toUri().toURL()).cached(false).build();
-        return new IssuerScopedJwkProvider(fileProvider, issuer);
+        return new ResolvedProvider(
+            new IssuerScopedJwkProvider(fileProvider, issuer),
+            KeySource.EXTERNAL_JWKS_FILE,
+            jwksPath.toString());
       }
 
       String normalizedIssuer =
@@ -191,7 +326,8 @@ public class JwksOperations {
       CachedDiscovery cached = discoveryCache.get(normalizedIssuer);
       if (cached != null
           && Duration.between(cached.fetchedAt(), Instant.now()).compareTo(DISCOVERY_TTL) < 0) {
-        return cached.provider();
+        return new ResolvedProvider(
+            cached.provider(), KeySource.DISCOVERY, normalizedIssuer);
       }
 
       // Below the cache-hit return, so this fires on an actual discovery fetch only -- at most
@@ -289,7 +425,7 @@ public class JwksOperations {
       JwkProvider provider = remoteProvider(configJwksUri, normalizedIssuer);
       discoveryCache.put(
           normalizedIssuer, new CachedDiscovery(configJwksUri, provider, Instant.now()));
-      return provider;
+      return new ResolvedProvider(provider, KeySource.DISCOVERY, normalizedIssuer);
     }
   }
 

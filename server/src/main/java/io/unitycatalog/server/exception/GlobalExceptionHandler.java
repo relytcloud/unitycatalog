@@ -1,8 +1,6 @@
 package io.unitycatalog.server.exception;
 
 import com.auth0.jwk.JwkException;
-import com.auth0.jwk.NetworkException;
-import com.auth0.jwk.RateLimitReachedException;
 import com.auth0.jwt.exceptions.JWTVerificationException;
 import com.linecorp.armeria.common.HttpRequest;
 import com.linecorp.armeria.common.HttpResponse;
@@ -35,31 +33,20 @@ public class GlobalExceptionHandler implements ExceptionHandlerFunction {
           HttpStatus.UNAUTHORIZED,
           createErrorResponse(
               ErrorCode.UNAUTHENTICATED, "Invalid access token.", cause, new HashMap<>()));
-    } else if (cause instanceof NetworkException) {
-      // NetworkException extends SigningKeyNotFoundException, so it must be checked before the
-      // generic JwkException branch below. The identity provider being unreachable is an upstream
-      // outage, not a rejected token, and the caller should retry rather than discard credentials.
-      return HttpResponse.ofJson(
-          HttpStatus.SERVICE_UNAVAILABLE,
-          createErrorResponse(
-              ErrorCode.UNAVAILABLE,
-              "Could not reach the identity provider to fetch signing keys.",
-              cause,
-              new HashMap<>()));
-    } else if (cause instanceof RateLimitReachedException) {
-      return HttpResponse.ofJson(
-          HttpStatus.SERVICE_UNAVAILABLE,
-          createErrorResponse(
-              ErrorCode.UNAVAILABLE,
-              "Too many signing-key lookups; retry shortly.",
-              cause,
-              new HashMap<>()));
     } else if (cause instanceof JwkException) {
-      // JWKS lookup failures (e.g. SigningKeyNotFoundException when the JWT's kid is not present in
-      // the JWKS) are checked exceptions from com.auth0.jwk -- a sibling hierarchy of the
-      // com.auth0.jwt JWTVerificationException handled above, and not a RuntimeException. Without
-      // this branch they fall through to Armeria's default handler and surface as a bodyless HTTP
-      // 500. Map them to 401, consistent with the other token-verification failures.
+      // A safety net, no longer the classifier. JwksOperations translates key-lookup failures into
+      // BaseException at the point the key set's PROVENANCE is known, because auth0's hierarchy
+      // cannot express it: UrlJwkProvider wraps every IOException as NetworkException, and the
+      // internal certs file and the static JWKS file are both UrlJwkProviders over file: URLs, so
+      // "NetworkException" there means a missing local file, not an unreachable identity provider.
+      // Deciding it here produced a 503 "could not reach the identity provider" for a deleted
+      // certs.json, on every authenticated call.
+      //
+      // What remains is this branch, kept because com.auth0.jwk exceptions are checked exceptions
+      // from a sibling hierarchy of com.auth0.jwt's JWTVerificationException and not
+      // RuntimeExceptions: any that still escapes would otherwise reach Armeria's default handler
+      // and surface as a bodyless HTTP 500. 401 is the conservative answer for an unclassified
+      // signing-key failure, and matches what this code did before any of the branches existed.
       return HttpResponse.ofJson(
           HttpStatus.UNAUTHORIZED,
           createErrorResponse(
