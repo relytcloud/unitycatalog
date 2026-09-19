@@ -308,9 +308,10 @@ The two sources also behave differently under the hood, by design: the JWKS file
 every verification (uncached, so a newly appended DWSU key takes effect with no restart), while for
 Entra the server caches the **built key provider** per issuer for 24h — not just the discovery
 document — so a token exchange normally does not re-fetch either the discovery document or Entra's
-JWKS. The underlying key lookup is additionally capped at 10 requests/minute per issuer. Expect the
-server log to show `resolving keys by OIDC discovery` once per issuer per cache window, not on
-every exchange.
+JWKS. The underlying key lookup is additionally capped at 10 requests/minute per issuer. This is
+logged at `debug` (`resolving keys by OIDC discovery`, once per issuer per cache window, not on
+every exchange) — raise `rootLogger.level` to `debug` (see [Logging](#logging)) to see it; at the
+shipped `info` default it stays silent even when caching is working correctly.
 
 ### 6. Network requirement
 
