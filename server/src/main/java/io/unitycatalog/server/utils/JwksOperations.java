@@ -14,7 +14,9 @@ import com.auth0.jwt.interfaces.Verification;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.linecorp.armeria.client.ResponseTimeoutException;
 import com.linecorp.armeria.client.WebClient;
+import com.linecorp.armeria.common.AggregatedHttpResponse;
 import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.exception.OAuthInvalidClientException;
 import io.unitycatalog.server.exception.OAuthInvalidRequestException;
@@ -25,17 +27,26 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletionException;
 import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class JwksOperations {
 
-  private final WebClient webClient = WebClient.builder().build();
+  /**
+   * Timeout for reaching a remote identity provider. Applies to the discovery document here and,
+   * via {@code JwkProviderBuilder.timeouts}, to the JWKS fetch. Without it a slow IdP blocks the
+   * calling thread indefinitely.
+   */
+  private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(5);
+
+  private final WebClient webClient = WebClient.builder().responseTimeout(HTTP_TIMEOUT).build();
   private static final ObjectMapper mapper = new ObjectMapper();
   private final SecurityContext securityContext;
   private final ServerProperties serverProperties;
@@ -137,17 +148,36 @@ public class JwksOperations {
       var path = wellKnownConfigUrl + ".well-known/openid-configuration";
       LOGGER.debug("path: {}", path);
 
-      String response = webClient
-          .get(path)
-          .aggregate()
-          .join()
-          .contentUtf8();
+      AggregatedHttpResponse discoveryResponse;
+      try {
+        discoveryResponse = webClient.get(path).aggregate().join();
+      } catch (CompletionException e) {
+        if (e.getCause() instanceof ResponseTimeoutException) {
+          throw new OAuthInvalidRequestException(
+              ErrorCode.DEADLINE_EXCEEDED,
+              "Timed out fetching the OIDC configuration for issuer " + issuer);
+        }
+        throw new OAuthInvalidRequestException(
+            ErrorCode.UNAVAILABLE,
+            "Could not reach the identity provider for issuer " + issuer,
+            e);
+      }
+
+      if (!discoveryResponse.status().isSuccess()) {
+        throw new OAuthInvalidRequestException(
+            ErrorCode.UNAVAILABLE,
+            String.format(
+                "Identity provider returned HTTP %d for the OIDC configuration of issuer %s",
+                discoveryResponse.status().code(), issuer));
+      }
+
+      String response = discoveryResponse.contentUtf8();
 
       // TODO: We should cache this. No need to fetch it each time.
       Map<String, Object> configMap = mapper.readValue(response, new TypeReference<>() {});
 
       if (configMap == null || configMap.isEmpty()) {
-        throw new OAuthInvalidRequestException(ErrorCode.ABORTED,
+        throw new OAuthInvalidRequestException(ErrorCode.UNAVAILABLE,
             "Could not get issuer configuration");
       }
 

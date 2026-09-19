@@ -7,9 +7,13 @@ import static org.mockito.Mockito.when;
 
 import com.auth0.jwk.JwkException;
 import com.auth0.jwk.JwkProvider;
+import com.linecorp.armeria.common.HttpStatus;
+import io.unitycatalog.server.exception.BaseException;
+import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.security.SecurityContext;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -116,6 +120,49 @@ public class JwksOperationsTest {
     ServerProperties serverProperties = mock(ServerProperties.class);
     when(serverProperties.getExternalJwksFile()).thenReturn(jwksFile.toString());
     return new JwksOperations(mock(SecurityContext.class), serverProperties);
+  }
+
+  @Test
+  public void discoveryNon2xxIsReportedAsUnavailable() throws Exception {
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.failDiscoveryWith(HttpStatus.INTERNAL_SERVER_ERROR);
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void discoveryOnAnUnreachableHostIsReportedAsUnavailable() throws Exception {
+    // Port 1 on loopback refuses connections immediately, so this fails fast without waiting for
+    // the timeout.
+    JwksOperations ops =
+        opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+    assertThatThrownBy(() -> ops.loadJwkProvider("http://127.0.0.1:1"))
+        .isInstanceOf(BaseException.class)
+        .extracting(e -> ((BaseException) e).getErrorCode())
+        .isEqualTo(ErrorCode.UNAVAILABLE);
+  }
+
+  @Test
+  public void discoveryTimeoutIsReportedAsDeadlineExceeded() throws Exception {
+    // Takes ~5 seconds by design: the timeout is a fixed constant, so the test waits it out rather
+    // than reaching into the class to shorten it.
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.delayDiscoveryBy(Duration.ofSeconds(30));
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.DEADLINE_EXCEEDED);
+    }
   }
 
   @Test
