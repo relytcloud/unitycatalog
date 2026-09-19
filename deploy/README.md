@@ -255,6 +255,11 @@ Then create a client secret under **Certificates & secrets** → `UC_CLIENT_SECR
 uses this secret itself — it only ever verifies signatures with Entra's public keys — but a client
 running the authorization-code flow (the CLI today) needs it.
 
+If you intend to sign in with the CLI, also register a redirect URI now — **Authentication → Add a
+platform → Mobile and desktop applications** — of the form `http://localhost:<port>`, and use that
+same port as `UC_REDIRECT_PORT` (see step 4). Entra matches the redirect URI of a confidential
+client exactly, so the port has to be pinned on both sides.
+
 ### 2. Add `email` as an optional claim — this is required
 
 Under **Token configuration → Add optional claim → ID**, add `email`. Without it, the ID token
@@ -278,13 +283,23 @@ UC does not create users on first sign-in. Provision each user in UC via SCIM fi
 `User not provisioned: <email>` — a distinct message from the missing-claim case above, so you
 can tell "fix the app registration" apart from "provision this user" at a glance.
 
-### 4. Configure the three values in `uc.env`
+### 4. Configure the Entra values in `uc.env`
 
 ```
 UC_ENTRA_TENANT_ID=<directory-tenant-id>
 UC_CLIENT_ID=<application-client-id>
 UC_CLIENT_SECRET=<client-secret-value>
+# Only for CLI login; see below.
+UC_REDIRECT_PORT=8020
 ```
+
+**`UC_REDIRECT_PORT` is what makes CLI login against Entra possible.** It is rendered as
+`server.redirect-port`, which the CLI reads to decide where its login callback listens
+(`Oauth2CliExchange.findAvailablePort()`); left blank, the CLI takes a random free port instead.
+Entra requires an exact redirect-URI match for a confidential client, and no registered URI can
+match a random port, so CLI login needs both a fixed `UC_REDIRECT_PORT` and the matching
+`http://localhost:<port>` registered as a redirect URI on the app registration (step 1). The
+server itself does not use this value — leave it blank if you only exchange raw tokens.
 
 Restart UC to pick them up (unlike the JWKS file, this is a startup snapshot, not hot-reloaded).
 `deploy-uc.sh` derives the CLI's authorization/token URLs

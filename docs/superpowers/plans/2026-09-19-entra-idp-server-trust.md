@@ -1297,4 +1297,4 @@ Automated tests cannot prove that a real app registration emits the `email` clai
 4. Expect a UC access token back, and confirm it works on a normal API call.
 5. Confirm the server log shows `resolving keys by OIDC discovery` for the Entra issuer and that a second exchange does not re-fetch the discovery document.
 
-If the CLI is used for step 3 rather than a raw token: Entra requires an exact redirect-URI match for confidential clients, while `Oauth2CliExchange.authenticate()` picks a random port via `findAvailablePort()` and ignores the existing `server.redirect-port` property. Wiring that property up is recorded in the spec as a known follow-up and is **not** part of this plan.
+If the CLI is used for step 3 rather than a raw token: Entra requires an exact redirect-URI match for confidential clients, while `Oauth2CliExchange.findAvailablePort()` falls back to a random port whenever `server.redirect-port` is blank. The CLI does honour that property when it is set; what the deploy path did not do was render it. Setting it (and registering the matching `http://localhost:<port>`) is recorded in the spec as a known follow-up and is **not** part of this plan.

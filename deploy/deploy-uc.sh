@@ -84,6 +84,9 @@ UC_CLIENT_ID="${UC_CLIENT_ID:-}"
 UC_CLIENT_SECRET="${UC_CLIENT_SECRET:-}"
 UC_AUTHORIZATION_URL="${UC_AUTHORIZATION_URL:-}"
 UC_TOKEN_URL="${UC_TOKEN_URL:-}"
+# Blank is a legitimate value: the CLI then picks a random free port. It is only Entra, which
+# demands an exact registered redirect URI, that needs a fixed one.
+UC_REDIRECT_PORT="${UC_REDIRECT_PORT:-}"
 
 # Validate required values (paths are derived, so only real config/secrets are required).
 missing=0
@@ -100,6 +103,7 @@ done
 # Substitute ${VAR} placeholders in a template -> output file (only the known keys).
 export UC_AUTHORIZATION UC_ALLOWED_ISSUERS UC_EXTERNAL_JWKS_FILE UC_AUDIENCES UC_ACCESS_TOKEN_TTL \
        UC_ENTRA_TENANT_ID UC_CLIENT_ID UC_CLIENT_SECRET UC_AUTHORIZATION_URL UC_TOKEN_URL \
+       UC_REDIRECT_PORT \
        ALIYUN_REGION ALIYUN_ACCESS_KEY ALIYUN_SECRET_KEY ALIYUN_MASTER_ROLE_ARN UC_DB_FILE
 render() {
   local tpl="$1" out="$2"
@@ -107,10 +111,13 @@ render() {
   python3 - "$tpl" "$out" <<'PY'
 import os, re, sys
 tpl, out = sys.argv[1], sys.argv[2]
+# Must stay in step with the export line above. A template placeholder missing from this list
+# fails the deploy at the unknown-placeholder check below; a key listed here but never exported
+# silently renders as empty, which is indistinguishable from "deliberately blank". Add to both.
 keys = ["UC_AUTHORIZATION", "UC_ALLOWED_ISSUERS", "UC_EXTERNAL_JWKS_FILE", "UC_AUDIENCES",
         "UC_ACCESS_TOKEN_TTL", "UC_ENTRA_TENANT_ID", "UC_CLIENT_ID", "UC_CLIENT_SECRET",
-        "UC_AUTHORIZATION_URL", "UC_TOKEN_URL", "ALIYUN_REGION", "ALIYUN_ACCESS_KEY",
-        "ALIYUN_SECRET_KEY", "ALIYUN_MASTER_ROLE_ARN", "UC_DB_FILE"]
+        "UC_AUTHORIZATION_URL", "UC_TOKEN_URL", "UC_REDIRECT_PORT", "ALIYUN_REGION",
+        "ALIYUN_ACCESS_KEY", "ALIYUN_SECRET_KEY", "ALIYUN_MASTER_ROLE_ARN", "UC_DB_FILE"]
 s = open(tpl, encoding="utf-8").read()
 
 # A placeholder the key list above does not cover would survive into the rendered file and be read

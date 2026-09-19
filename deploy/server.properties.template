@@ -8,7 +8,9 @@ server.authorization-url=${UC_AUTHORIZATION_URL}
 server.token-url=${UC_TOKEN_URL}
 server.client-id=${UC_CLIENT_ID}
 server.client-secret=${UC_CLIENT_SECRET}
-server.redirect-port=
+# Fixed localhost port for the CLI login callback. Blank makes the CLI pick a random free port,
+# which cannot match the exact redirect URI Entra requires of a confidential client.
+server.redirect-port=${UC_REDIRECT_PORT}
 
 # OPTIONAL extra trusted issuers (comma-separated). Trusted issuers are derived primarily from the
 # JWKS file below (each key's "issuer" member, hot-reloaded); this list is a UNION on top, only for

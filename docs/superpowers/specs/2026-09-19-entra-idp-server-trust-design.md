@@ -260,8 +260,10 @@ derived `authorization-url` and `token-url` are in place.
 Recorded here, deliberately not in this spec:
 
 - **CLI redirect URI.** Entra requires an exact redirect-URI match for confidential clients, while
-  `Oauth2CliExchange` picks a random port via `findAvailablePort()`. The `server.redirect-port`
-  property exists but is unused. Wiring it up is likely needed for CLI login against Entra.
+  `Oauth2CliExchange.findAvailablePort()` falls back to a random port. The CLI does read
+  `server.redirect-port` and honours it when it is set; what was missing was the deploy path
+  rendering it, so it was always blank. CLI login against Entra needs that value set and the
+  matching `http://localhost:<port>` registered on the app registration.
 - **Okta and Keycloak are not wired.** `ui/src/pages/Login.tsx:68` passes an Okta `onSuccess` that
   only calls `console.log`, and `KeycloakAuthButton` is entirely commented out. Only Google has
   ever exercised the login path.

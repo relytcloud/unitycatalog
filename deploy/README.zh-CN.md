@@ -226,6 +226,10 @@ Microsoft 365 租户里的用户不需要实例签名密钥，也能用 Entra ID
 再到 **Certificates & secrets** 下创建一个 client secret → `UC_CLIENT_SECRET`。服务端自己从不使用这个
 secret —— 它只用 Entra 的公钥验签 —— 但跑 authorization-code 流程的客户端（目前是 CLI）需要它。
 
+如果要用 CLI 登录，还要在 **Authentication → Add a platform → Mobile and desktop applications**
+下注册一个 `http://localhost:<port>` 形式的 redirect URI，并把同一个端口填到 `UC_REDIRECT_PORT`（见
+第 4 步）。Entra 对 confidential client 的 redirect URI 是**精确匹配**的，所以两边的端口必须固定且一致。
+
 ### 2. 把 `email` 加成 optional claim —— 这一步必须做
 
 在 **Token configuration → Add optional claim → ID** 下添加 `email`。不加的话，ID token 里只有 `sub`
@@ -248,13 +252,21 @@ UC 不会在首次登录时自动建用户。请先通过 SCIM 在 UC 里开通�
 **完全一致**。能解析出邮箱但未开通的主体会报 `User not provisioned: <email>` —— 与上面缺 claim 的消息
 明显不同，一眼就能分清是"改应用注册"还是"开通这个用户"。
 
-### 4. 在 `uc.env` 里配这三个值
+### 4. 在 `uc.env` 里配这几个值
 
 ```
 UC_ENTRA_TENANT_ID=<directory-tenant-id>
 UC_CLIENT_ID=<application-client-id>
 UC_CLIENT_SECRET=<client-secret-value>
+# 仅 CLI 登录需要，见下文。
+UC_REDIRECT_PORT=8020
 ```
+
+**有了 `UC_REDIRECT_PORT`，CLI 才能对着 Entra 登录。** 它会被渲染成 `server.redirect-port`，CLI
+读它来决定登录回调监听哪个端口（`Oauth2CliExchange.findAvailablePort()`）；留空则 CLI 随机挑一个空闲
+端口。而 Entra 对 confidential client 的 redirect URI 是精确匹配的，随机端口永远对不上已注册的 URI，所以
+CLI 登录需要：固定的 `UC_REDIRECT_PORT` + 在应用注册里注册上对应的 `http://localhost:<port>`（第 1 步）。
+服务端自身不使用这个值 —— 如果只用原始 token 做交换，留空即可。
 
 改完要**重启 UC** 才生效（与 JWKS 文件不同，这几项是启动快照，不热加载）。`deploy-uc.sh` 会从 tenant id
 自动推导 CLI 用的 authorization / token URL
