@@ -104,7 +104,39 @@ public class UnityCatalogServer {
     }
   }
 
+  /**
+   * Records the Microsoft Entra ID trust set derived from {@code server.entra.tenant-id}. The
+   * rendered {@code server.properties} carries only the tenant id, so without this line the issuer
+   * and audience actually trusted appear in no file and no log. Emitted once at startup, and only
+   * when an Entra tenant is configured.
+   */
+  private void logEntraTrustConfiguration() {
+    String entraIssuer = serverProperties.getEntraIssuer();
+    if (entraIssuer == null) {
+      return;
+    }
+    String entraAudience = serverProperties.get(ServerProperties.Property.CLIENT_ID);
+    if (entraAudience == null || entraAudience.isBlank()) {
+      // The likeliest misconfiguration: with no client id no audience is derived, so every Entra
+      // token fails withAnyOfAudience and the operator sees only an opaque 401 about 'aud'.
+      LOGGER.info(
+          "Microsoft Entra ID trust derived from server.entra.tenant-id: issuer '{}', but NO"
+              + " audience was derived because server.client-id is unset. Every Entra token will"
+              + " be rejected with \"The Claim 'aud' value doesn't contain the required"
+              + " audience\". Set UC_CLIENT_ID (server.client-id) and restart.",
+          entraIssuer);
+    } else {
+      LOGGER.info(
+          "Microsoft Entra ID trust derived from server.entra.tenant-id: issuer '{}', audience"
+              + " '{}'.",
+          entraIssuer,
+          entraAudience);
+    }
+  }
+
   private Server initializeServer(UnityCatalogServer.Builder unityCatalogServerBuilder) {
+    logEntraTrustConfiguration();
+
     // Expose Prometheus metrics at /metrics so per-route request counts (e.g.
     // credential vending) are scrapeable. MetricCollectingService records every
     // route; PrometheusExpositionService serves the registry.
