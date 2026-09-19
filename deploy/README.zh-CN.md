@@ -275,7 +275,8 @@ discovery。所以一套部署可以同时跑 DWSU token-exchange 和 Entra 登�
 两者在实现上也有意不同：JWKS 文件每次验签都现读（不缓存，所以新追加的 DWSU key 不重启即刻生效）；而对
 Entra，服务端按 issuer 把**构建好的 key provider** 缓存 24 小时 —— 缓存的不只是 discovery 文档 —— 所以
 正常情况下一次 token 交换既不会重新拉 discovery 文档，也不会重新拉 Entra 的 JWKS。底层的 key 查询另有
-每 issuer 每分钟 10 次的限流。每次**真正发生**的 discovery 拉取都会打一条 `info` 日志
+按 issuer 的限流：最多突发 10 次，之后每 6 秒回补 1 次（即每分钟 10 次）。每次**真正发生**的
+discovery 拉取都会打一条 `info` 日志
 （`resolving keys by OIDC discovery`，每个 issuer 每个缓存周期一条，不是每次交换一条），在出厂默认的
 `rootLogger.level = info` 下就能看到：某个 issuer 只出现一次、之后不再出现，就说明缓存是生效的。
 

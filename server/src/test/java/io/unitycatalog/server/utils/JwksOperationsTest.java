@@ -11,6 +11,8 @@ import com.linecorp.armeria.common.HttpStatus;
 import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.security.SecurityContext;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -210,6 +212,153 @@ public class JwksOperationsTest {
       assertThat(idp.discoveryHits()).isEqualTo(1);
       assertThat(idp.jwksHits()).isEqualTo(1);
     }
+  }
+
+  @Test
+  public void jwksUriWithANonHttpsSchemeIsRejected() throws Exception {
+    // UrlJwkProvider opens whatever URL it is handed. A discovery document that points the key
+    // fetch at the local filesystem (or ftp, or a cloud metadata address) must never be built
+    // into a provider, let alone cached for a day.
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.serveDiscoveryBody(
+          "{\"issuer\":\"" + idp.issuer() + "\",\"jwks_uri\":\"file:///etc/passwd\"}");
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .hasMessageContaining("unsupported scheme 'file'")
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void relativeJwksUriIsRejected() throws Exception {
+    // The commonest misconfigured-IdP output. URI.create("/keys").toURL() throws
+    // IllegalArgumentException, which matches no exception-handler branch and surfaced as a 500.
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.serveDiscoveryBody("{\"issuer\":\"" + idp.issuer() + "\",\"jwks_uri\":\"/keys\"}");
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void nonStringIssuerMemberIsRejected() throws Exception {
+    // A JSON number where a string belongs used to reach a (String) cast: the ClassCastException
+    // matched no handler branch and surfaced as a bodyless 500.
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.serveDiscoveryBody("{\"issuer\":123,\"jwks_uri\":\"" + idp.issuer() + "/keys\"}");
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void jwksUriPointingAtTheCloudMetadataAddressIsRejected() throws Exception {
+    // https alone does not close the hole: 169.254.169.254 is the cloud metadata endpoint, and
+    // whether the fetch succeeded is observable through the 401-vs-503 split.
+    assertJwksUriRejected("https://169.254.169.254/latest/meta-data/", "169.254.169.254");
+  }
+
+  @Test
+  public void jwksUriPointingAtAPrivateRangeIsRejected() throws Exception {
+    assertJwksUriRejected("https://10.1.2.3/keys", "10.1.2.3");
+    assertJwksUriRejected("https://192.168.1.1/keys", "192.168.1.1");
+    assertJwksUriRejected("https://172.16.0.1/keys", "172.16.0.1");
+  }
+
+  @Test
+  public void jwksUriUsingTheDecimalSpellingOfLoopbackIsRejected() throws Exception {
+    // 2130706433 is 127.0.0.1 written as a single decimal, which InetAddress and URL.openConnection
+    // both read as loopback. A dotted-quad-only check would wave it through as a DNS name.
+    assertJwksUriRejected("https://2130706433/keys", "2130706433");
+  }
+
+  @Test
+  public void plainHttpJwksUriToANonLoopbackHostIsRejected() throws Exception {
+    // http is tolerated only for a local test IdP.
+    assertJwksUriRejected("http://keys.example.test/keys", "keys.example.test");
+  }
+
+  /**
+   * Serves a discovery document carrying this jwks_uri and asserts it is refused as an upstream
+   * failure, without the URL's host reaching the caller-visible message.
+   */
+  private void assertJwksUriRejected(String jwksUri, String hostThatMustNotLeak) throws Exception {
+    try (DiscoveryTestServer idp = new DiscoveryTestServer("{\"keys\":[]}")) {
+      idp.serveDiscoveryBody(
+          "{\"issuer\":\"" + idp.issuer() + "\",\"jwks_uri\":\"" + jwksUri + "\"}");
+      JwksOperations ops =
+          opsForJwks("{\"keys\":[" + entry("kidLocal", X_A, Y_A, "some-other-issuer") + "]}");
+
+      assertThatThrownBy(() -> ops.loadJwkProvider(idp.issuer()))
+          .isInstanceOf(BaseException.class)
+          .hasMessageNotContaining(hostThatMustNotLeak)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void remoteKeyLookupsAllowATenBurstAndRefillAtTenPerMinute() throws Exception {
+    // JwkProviderBuilder.rateLimited's middle argument is the refill PERIOD for one token, not a
+    // count per unit: BucketImpl.getRatePerToken() returns unit.toMillis(rate). The previous
+    // (10, 10, MINUTES) therefore meant one token every ten minutes, so ~10 unauthenticated
+    // requests carrying junk 'kid's could drain the bucket and keep every uncached key lookup
+    // failing for 100 minutes. Draining the bucket and reading its refill delay pins the unit
+    // without sleeping.
+    JwksOperations ops = opsForJwks("{\"keys\":[]}");
+    JwkProvider provider = ops.remoteProvider("https://idp.example/keys", "https://idp.example");
+    Object bucket = rateLimitBucketOf(provider);
+
+    for (int i = 1; i <= 10; i++) {
+      assertThat(consume(bucket)).as("burst token %d of 10", i).isTrue();
+    }
+    assertThat(consume(bucket)).as("11th lookup within the burst").isFalse();
+
+    // One token per 6000ms is ten lookups per minute; the configuration this replaces would be
+    // ~600000, which is what the upper bound catches.
+    assertThat(willLeakIn(bucket)).isBetween(5_000L, 6_000L);
+  }
+
+  /**
+   * jwks-rsa's chain is cache -&gt; rate limiter -&gt; URL provider. The bucket, and the Bucket
+   * type itself, are package-private to com.auth0.jwk, so the configuration can only be observed
+   * reflectively.
+   */
+  private static Object rateLimitBucketOf(JwkProvider cachedProvider) throws Exception {
+    Method getBaseProvider = cachedProvider.getClass().getDeclaredMethod("getBaseProvider");
+    getBaseProvider.setAccessible(true);
+    Object rateLimited = getBaseProvider.invoke(cachedProvider);
+    Field bucketField = rateLimited.getClass().getDeclaredField("bucket");
+    bucketField.setAccessible(true);
+    return bucketField.get(rateLimited);
+  }
+
+  /** Takes one token, as a key lookup would. */
+  private static boolean consume(Object bucket) throws Exception {
+    Method consume = bucket.getClass().getDeclaredMethod("consume");
+    consume.setAccessible(true);
+    return (boolean) consume.invoke(bucket);
+  }
+
+  /** Milliseconds until one more token is available. */
+  private static long willLeakIn(Object bucket) throws Exception {
+    Method willLeakIn = bucket.getClass().getDeclaredMethod("willLeakIn", long.class);
+    willLeakIn.setAccessible(true);
+    return (long) willLeakIn.invoke(bucket, 1L);
   }
 
   @Test

@@ -23,7 +23,12 @@ import io.unitycatalog.server.exception.OAuthInvalidClientException;
 import io.unitycatalog.server.exception.OAuthInvalidRequestException;
 import io.unitycatalog.server.security.SecurityContext;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.MalformedURLException;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.interfaces.ECPublicKey;
@@ -32,11 +37,13 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,14 +57,43 @@ public class JwksOperations {
    */
   private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(5);
 
-  /** Remote key cache: entries and lifetime. A cache miss on an unknown kid still triggers a
-   * fetch, which is what lets key rotation work; the rate limit is what stops that being abused. */
-  private static final long KEY_CACHE_SIZE = 10;
+  /**
+   * Remote key cache: entries and lifetime. A cache miss on an unknown kid still triggers a fetch,
+   * which is what lets key rotation work; the rate limit is what stops that being abused. Entra
+   * commonly publishes around six signing keys and rotates them, so the cache is sized well clear
+   * of that -- an eviction buys nothing and costs a network round trip on the next exchange.
+   */
+  private static final long KEY_CACHE_SIZE = 32;
+
   private static final long KEY_CACHE_TTL_HOURS = 24;
+
+  /**
+   * Rate limit on remote key lookups: a burst of {@link #RATE_LIMIT_BUCKET} tokens, refilled one
+   * token every {@link #RATE_LIMIT_REFILL_PERIOD_SECONDS} seconds -- i.e. ten lookups per minute.
+   *
+   * <p>UNIT TRAP, do not "simplify" this back to {@code (10, 10, TimeUnit.MINUTES)}. {@code
+   * JwkProviderBuilder.rateLimited(size, rate, unit)} does NOT take a count per unit: {@code
+   * BucketImpl.getRatePerToken()} returns {@code unit.toMillis(rate)}, which is the refill PERIOD
+   * for ONE token. {@code (10, 10, MINUTES)} therefore means one token every ten minutes, not ten
+   * per minute; ten junk requests would drain the bucket and keep every uncached key lookup
+   * failing for over an hour. Six seconds per token is ten lookups per minute, which is what this
+   * is meant to allow.
+   */
   private static final long RATE_LIMIT_BUCKET = 10;
-  private static final long RATE_LIMIT_PER_MINUTE = 10;
+
+  private static final long RATE_LIMIT_REFILL_PERIOD_SECONDS = 6;
+
   /** How long a resolved jwks_uri is reused before the discovery document is re-read. */
   private static final Duration DISCOVERY_TTL = Duration.ofHours(24);
+
+  /**
+   * Matches every all-numeric host form, so an IPv4 literal can be told from a DNS name without
+   * resolving one. Deliberately wider than a dotted quad: {@code https://2130706433/} is the
+   * decimal spelling of {@code 127.0.0.1}, and {@code InetAddress} reads it as such, so a
+   * quad-only pattern would classify it as a DNS name and wave it through. No DNS name is
+   * all-digits, so nothing real is caught by this.
+   */
+  private static final Pattern NUMERIC_HOST = Pattern.compile("\\d+(\\.\\d+)*");
 
   private record CachedDiscovery(String jwksUri, JwkProvider provider, Instant fetchedAt) {}
 
@@ -234,8 +270,8 @@ public class JwksOperations {
             "Could not get issuer configuration");
       }
 
-      String configIssuer = (String) configMap.get("issuer");
-      String configJwksUri = (String) configMap.get("jwks_uri");
+      String configIssuer = stringMember(configMap, "issuer", normalizedIssuer);
+      String configJwksUri = stringMember(configMap, "jwks_uri", normalizedIssuer);
 
       // Null when the document has no "issuer" member at all -- a mismatch like any other, and
       // checked explicitly so a malformed document cannot NPE its way to a bodyless 500.
@@ -248,7 +284,9 @@ public class JwksOperations {
         throw new OAuthInvalidRequestException(ErrorCode.ABORTED, "JWKS configuration missing");
       }
 
-      JwkProvider provider = remoteProvider(configJwksUri);
+      // Validated before the provider is built, so a rejected jwks_uri is never cached for
+      // DISCOVERY_TTL and no connection is ever opened to it.
+      JwkProvider provider = remoteProvider(configJwksUri, normalizedIssuer);
       discoveryCache.put(
           normalizedIssuer, new CachedDiscovery(configJwksUri, provider, Instant.now()));
       return provider;
@@ -256,17 +294,196 @@ public class JwksOperations {
   }
 
   /**
+   * Read a member of a discovery document as a string. A member that is present but of another
+   * JSON type used to reach a {@code (String)} cast and escape as a ClassCastException -- no
+   * GlobalExceptionHandler branch matches it, so it surfaced as a bodyless HTTP 500. It is an
+   * upstream failure like any other malformed document, so it is reported the same way.
+   *
+   * @return the member's value, or null when the document has no such member
+   */
+  private static String stringMember(Map<String, Object> configMap, String member, String issuer) {
+    Object value = configMap.get(member);
+    if (value == null || value instanceof String) {
+      return (String) value;
+    }
+    throw new OAuthInvalidRequestException(
+        ErrorCode.UNAVAILABLE,
+        String.format(
+            "Identity provider returned a malformed OIDC configuration for issuer %s: '%s' is not"
+                + " a string",
+            issuer, member));
+  }
+
+  /**
+   * Validate a {@code jwks_uri} before anything opens a connection to it.
+   *
+   * <p>{@code UrlJwkProvider} hands the URL straight to {@code URL.openConnection()} with no
+   * scheme restriction, and this endpoint is unauthenticated, so an identity provider -- or
+   * anything able to answer as one -- could otherwise aim the fetch at {@code file:///}, {@code
+   * ftp://} or a cloud metadata address, with the outcome observable through the 401-vs-503 split.
+   * The rule is:
+   *
+   * <ul>
+   *   <li>{@code https} to a host that is not loopback, link-local, any-local or private: allowed
+   *   <li>{@code http} to a loopback host: allowed, and only so a local test IdP still works
+   *   <li>everything else, including {@code https://169.254.169.254} and the RFC 1918 ranges:
+   *       rejected
+   * </ul>
+   *
+   * <p>Only a literal address is classified. A DNS name is deliberately not resolved here:
+   * resolving it would open a rebinding race between this check and the fetch, so it would buy no
+   * real defence for the complexity. Everything rejected is an unusable upstream configuration,
+   * hence {@link ErrorCode#UNAVAILABLE}.
+   *
+   * <p>The URL itself is attacker-supplied, so it is logged at debug only, and the message names
+   * the scheme or the class of address -- what an operator needs -- and nothing more.
+   */
+  private static URL validatedJwksUrl(String jwksUri, String issuer) {
+    URI uri;
+    try {
+      uri = new URI(jwksUri);
+    } catch (URISyntaxException e) {
+      LOGGER.debug("Issuer '{}': jwks_uri is not a valid URI: '{}'", issuer, jwksUri);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Identity provider published an unusable jwks_uri for issuer " + issuer,
+          e);
+    }
+
+    if (!uri.isAbsolute() || uri.getScheme() == null) {
+      LOGGER.debug("Issuer '{}': jwks_uri is not an absolute URL: '{}'", issuer, jwksUri);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Identity provider published a jwks_uri that is not an absolute URL, for issuer "
+              + issuer);
+    }
+
+    String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
+    if (!"https".equals(scheme) && !"http".equals(scheme)) {
+      LOGGER.debug("Issuer '{}': rejected jwks_uri '{}'", issuer, jwksUri);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          String.format(
+              "Identity provider published a jwks_uri with an unsupported scheme '%s' for issuer"
+                  + " %s; only https is accepted",
+              scheme, issuer));
+    }
+
+    String host = uri.getHost();
+    if (host == null || host.isBlank()) {
+      // Also the fail-closed answer for an authority Java declines to parse into a host.
+      LOGGER.debug("Issuer '{}': jwks_uri has no usable host: '{}'", issuer, jwksUri);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Identity provider published a jwks_uri with no usable host, for issuer " + issuer);
+    }
+
+    boolean loopback = isLoopbackHost(host);
+    if ("http".equals(scheme) && !loopback) {
+      LOGGER.debug("Issuer '{}': rejected plain-http jwks_uri '{}'", issuer, jwksUri);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Identity provider published a plain-http jwks_uri to a non-loopback host, for issuer "
+              + issuer
+              + "; only https is accepted");
+    }
+    if ("https".equals(scheme) && isInternalAddress(host)) {
+      LOGGER.debug("Issuer '{}': rejected internal-address jwks_uri '{}'", issuer, jwksUri);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Identity provider published a jwks_uri pointing at a loopback, link-local or private"
+              + " address, for issuer "
+              + issuer);
+    }
+
+    try {
+      return uri.toURL();
+    } catch (MalformedURLException | IllegalArgumentException e) {
+      LOGGER.debug("Issuer '{}': jwks_uri is not a usable URL: '{}'", issuer, jwksUri);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAVAILABLE,
+          "Identity provider published an unusable jwks_uri for issuer " + issuer,
+          e);
+    }
+  }
+
+  /**
+   * Whether a URI host names a loopback endpoint. {@code localhost} counts by name, because that
+   * is what a local test IdP is reached by; everything else must be a loopback literal.
+   */
+  private static boolean isLoopbackHost(String host) {
+    String bare = stripBrackets(host);
+    if (bare.equalsIgnoreCase("localhost")) {
+      return true;
+    }
+    InetAddress literal = literalAddress(bare);
+    return literal != null && literal.isLoopbackAddress();
+  }
+
+  /**
+   * Whether a URI host names an address this server must never fetch from: loopback, link-local
+   * (which is where 169.254.169.254, the cloud metadata address, lives), any-local, or a private /
+   * unique-local range. A DNS name that is not {@code localhost} is not classified -- see {@link
+   * #validatedJwksUrl} on why it is not resolved.
+   */
+  private static boolean isInternalAddress(String host) {
+    String bare = stripBrackets(host);
+    String lower = bare.toLowerCase(Locale.ROOT);
+    if (lower.equals("localhost") || lower.endsWith(".localhost")) {
+      return true;
+    }
+    InetAddress literal = literalAddress(bare);
+    if (literal == null) {
+      return false;
+    }
+    if (literal.isLoopbackAddress()
+        || literal.isLinkLocalAddress()
+        || literal.isAnyLocalAddress()
+        || literal.isSiteLocalAddress()) {
+      return true;
+    }
+    // IPv6 unique-local (fc00::/7). isSiteLocalAddress only covers the deprecated fec0::/10.
+    byte[] octets = literal.getAddress();
+    return octets.length == 16 && (octets[0] & 0xFE) == 0xFC;
+  }
+
+  /**
+   * The address a host denotes when -- and only when -- it is written as a literal. Returning null
+   * for anything else is what keeps this free of DNS lookups: {@code InetAddress.getByName} does
+   * not resolve a literal, and is never reached with a name.
+   */
+  private static InetAddress literalAddress(String host) {
+    if (!NUMERIC_HOST.matcher(host).matches() && host.indexOf(':') < 0) {
+      return null;
+    }
+    try {
+      return InetAddress.getByName(host);
+    } catch (UnknownHostException e) {
+      return null;
+    }
+  }
+
+  /** {@code URI.getHost()} keeps the brackets around an IPv6 literal; the classifiers cannot. */
+  private static String stripBrackets(String host) {
+    return host.startsWith("[") && host.endsWith("]")
+        ? host.substring(1, host.length() - 1)
+        : host;
+  }
+
+  /**
    * A provider for a remote JWKS endpoint. Unlike the static file — which stays uncached so a
    * newly appended DWSU key takes effect without a restart — a remote provider is cached, rate
    * limited and given explicit timeouts, because it is a network dependency on every token
    * exchange.
+   *
+   * <p>Package-private so a test can inspect the configured bucket; building a provider opens no
+   * connection.
    */
-  @SneakyThrows
-  private JwkProvider remoteProvider(String jwksUri) {
+  JwkProvider remoteProvider(String jwksUri, String issuer) {
     int timeoutMillis = (int) HTTP_TIMEOUT.toMillis();
-    return new JwkProviderBuilder(URI.create(jwksUri).toURL())
+    return new JwkProviderBuilder(validatedJwksUrl(jwksUri, issuer))
         .cached(KEY_CACHE_SIZE, KEY_CACHE_TTL_HOURS, TimeUnit.HOURS)
-        .rateLimited(RATE_LIMIT_BUCKET, RATE_LIMIT_PER_MINUTE, TimeUnit.MINUTES)
+        .rateLimited(RATE_LIMIT_BUCKET, RATE_LIMIT_REFILL_PERIOD_SECONDS, TimeUnit.SECONDS)
         .timeouts(timeoutMillis, timeoutMillis)
         .build();
   }
