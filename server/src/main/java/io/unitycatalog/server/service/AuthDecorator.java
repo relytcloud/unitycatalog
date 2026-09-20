@@ -76,7 +76,14 @@ public class AuthDecorator implements DecoratingHttpServiceFunction {
 
     LOGGER.debug("Validating access-token for issuer: {} and keyId: {}", issuer, keyId);
 
-    if (!issuer.equals(INTERNAL)) {
+    // Constant first, because an access token is not required to carry an 'iss' claim: JWT.decode
+    // accepts one that does not, and DecodedJWT.getIssuer() then returns null. issuer.equals(...)
+    // threw NullPointerException on it -- matching no GlobalExceptionHandler branch but the
+    // RuntimeException one, so a token that names no issuer produced a 500 instead of the
+    // PERMISSION_DENIED the very next line was there to give it. Reachable on every authenticated
+    // route, by anyone who can send a header. Same defect, and same fix, as AuthService's
+    // token-exchange path, which is the other place a caller-supplied issuer is read.
+    if (!INTERNAL.equals(issuer)) {
       throw new AuthorizationException(ErrorCode.PERMISSION_DENIED, "Invalid access token.");
     }
 

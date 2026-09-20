@@ -54,7 +54,11 @@ lazy val commonSettings = Seq(
     "org.slf4j" % "slf4j-api" % "2.0.13",
     "org.slf4j" % "slf4j-log4j12" % "2.0.13" % Test,
     "org.apache.logging.log4j" % "log4j-slf4j2-impl" % log4jVersion,
-    "org.apache.logging.log4j" % "log4j-api" % log4jVersion
+    "org.apache.logging.log4j" % "log4j-api" % log4jVersion,
+    // Already on the test classpath transitively, via log4j-slf4j2-impl. Declared explicitly
+    // because a test compiles against it: JwksOperationsTest attaches an appender to assert WHEN
+    // a log line is emitted, which is the only observable for a rule about logging.
+    "org.apache.logging.log4j" % "log4j-core" % log4jVersion % Test
   ),
   excludeDependencies ++= Seq(
     ExclusionRule("org.slf4j", "slf4j-reload4j")
@@ -427,6 +431,12 @@ lazy val server = (project in file("server"))
       (Test / runMain).toTask(s" io.unitycatalog.server.utils.PopulateTestDatabase").value
     },
     Test / javaOptions += s"-Duser.dir=${(ThisBuild / baseDirectory).value.getAbsolutePath}",
+    // JwksOperations refuses a plain-http jwks_uri unless this is set, so that a production server
+    // accepts https and nothing else. DiscoveryTestServer is a local IdP on loopback and cannot
+    // present a certificate any JVM trusts, so the test JVM -- and only the test JVM -- turns the
+    // loopback exception on. The rule as it applies WITHOUT the flag is asserted directly, by
+    // passing the flag's value to JwksOperations.validatedJwksUrl, so nothing here can hide it.
+    Test / javaOptions += "-Dio.unitycatalog.server.jwks.allowPlainHttpLoopback=true",
     // Include server and control models in the bin package for server
     // This will allow us to have a single maven artifact and not 3 (server, server models, control models)
     Compile / packageBin / mappings ++= (Compile / packageBin / mappings).value ++

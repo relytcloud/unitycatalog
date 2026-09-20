@@ -1,6 +1,8 @@
 package io.unitycatalog.server.base;
 
+import io.unitycatalog.control.model.User;
 import io.unitycatalog.server.UnityCatalogServer;
+import io.unitycatalog.server.persist.dao.UserDAO;
 import io.unitycatalog.server.persist.utils.HibernateConfigurator;
 import io.unitycatalog.server.service.credential.CloudCredentialVendor;
 import io.unitycatalog.server.utils.ServerProperties;
@@ -9,7 +11,9 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Date;
 import java.util.Properties;
+import java.util.UUID;
 import lombok.SneakyThrows;
 import org.hibernate.Session;
 import org.hibernate.SessionFactory;
@@ -94,6 +98,29 @@ public abstract class BaseServerTest {
               .build();
       unityCatalogServer.start();
       serverConfig.setServerUrl("http://localhost:" + port);
+    }
+  }
+
+  /**
+   * Provisions an ENABLED user with this email, so a token naming that principal is admitted.
+   *
+   * <p>Written straight through Hibernate rather than through the users API, which would itself
+   * need an authenticated call. The server keeps its own SessionFactory, but under {@code
+   * server.env=test} both point at the same {@code jdbc:h2:mem:testdb}, and {@link #tearDown}
+   * already clears UserDAO.
+   */
+  protected void provisionUser(String email) {
+    try (Session session = hibernateConfigurator.getSessionFactory().openSession()) {
+      Transaction tx = session.beginTransaction();
+      session.persist(
+          UserDAO.builder()
+              .id(UUID.randomUUID())
+              .name(email)
+              .email(email)
+              .state(User.StateEnum.ENABLED.name())
+              .createdAt(new Date())
+              .build());
+      tx.commit();
     }
   }
 

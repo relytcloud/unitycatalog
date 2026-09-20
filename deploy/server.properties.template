@@ -4,11 +4,13 @@ server.env=dev
 
 ## Authorization (enable for per-user token-exchange; disable to turn auth off)
 server.authorization=${UC_AUTHORIZATION}
-server.authorization-url=
-server.token-url=
-server.client-id=
-server.client-secret=
-server.redirect-port=
+server.authorization-url=${UC_AUTHORIZATION_URL}
+server.token-url=${UC_TOKEN_URL}
+server.client-id=${UC_CLIENT_ID}
+server.client-secret=${UC_CLIENT_SECRET}
+# Fixed localhost port for the CLI login callback. Blank makes the CLI pick a random free port,
+# which cannot match the exact redirect URI Entra requires of a confidential client.
+server.redirect-port=${UC_REDIRECT_PORT}
 
 # OPTIONAL extra trusted issuers (comma-separated). Trusted issuers are derived primarily from the
 # JWKS file below (each key's "issuer" member, hot-reloaded); this list is a UNION on top, only for
@@ -36,6 +38,10 @@ aws.region=
 server.external-jwks-file=${UC_EXTERNAL_JWKS_FILE}
 # Access-token lifetime for token-exchange (ISO-8601). Opt-in: leave blank for no expiry.
 server.access-token-ttl=${UC_ACCESS_TOKEN_TTL}
+
+# Microsoft Entra ID tenant. When set, the v2.0 issuer and the client id above are unioned into the
+# trusted issuers and accepted audiences. Blank = no Entra trust.
+server.entra.tenant-id=${UC_ENTRA_TENANT_ID}
 
 # Aliyun OSS — master RAM identity used by the STS AssumeRole mode.
 aliyun.region=${ALIYUN_REGION}
