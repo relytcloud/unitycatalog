@@ -680,6 +680,14 @@ public class JwksOperations {
    *
    * <p>The URL itself is attacker-supplied, so it is logged at debug only, and the message names
    * the scheme or the class of address -- what an operator needs -- and nothing more.
+   *
+   * <p><b>This bounds the URL we hand to the fetch, not every address the fetch can reach.</b>
+   * {@code UrlJwkProvider} delegates to {@code URL.openConnection()}, which follows same-protocol
+   * redirects, so an allow-listed identity provider whose {@code jwks_uri} answers 302 to an
+   * internal {@code https} address reaches it without passing through this check again. Closing
+   * that means fetching the JWKS here instead of delegating, and is not done yet. Read this as a
+   * guard against a discovery document that names a bad target outright -- which is the reachable
+   * case, since the issuer must already be allow-listed -- and not as a complete SSRF control.
    */
   private static URL validatedJwksUrl(String jwksUri, String issuer) {
     return validatedJwksUrl(jwksUri, issuer, plainHttpLoopbackAllowed());

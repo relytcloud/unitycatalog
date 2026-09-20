@@ -346,6 +346,14 @@ not as a rejected token. A discovery request that exceeds the 5-second timeout i
 **504** (`DEADLINE_EXCEEDED`). Only a genuinely unknown signing key (a `kid` that Entra itself does
 not recognize) still maps to 401.
 
+The `jwks_uri` named in a discovery document is checked before it is fetched: it must be `https`,
+and loopback, link-local, private, carrier-grade-NAT and multicast targets are refused, so a
+discovery document cannot aim the fetch at a cloud metadata endpoint or a `file://` path. Note the
+limit of that check — it applies to the URL we are handed, and the fetch itself follows
+same-protocol redirects, so an identity provider you have already trusted can still redirect the
+JWKS request to an internal `https` address. Trusting an issuer is therefore still a decision about
+the operator of that issuer, not one the server can fully contain.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |

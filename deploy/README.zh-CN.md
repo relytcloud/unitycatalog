@@ -306,6 +306,12 @@ UC 需要能出网访问 `login.microsoftonline.com`（HTTPS），用于拉取 E
 上游故障按故障报，不会当成 token 被拒。discovery 请求超过 5 秒超时则返回 **504**（`DEADLINE_EXCEEDED`）。
 只有确实找不到签名 key（`kid` 连 Entra 自己都不认）才仍然是 401。
 
+discovery 文档里给出的 `jwks_uri` 在真正发起请求前会先校验：必须是 `https`，并且会拒绝环回地址、
+链路本地地址、内网地址、运营商级 NAT 地址和组播地址，因此 discovery 文档无法把请求指向云厂商的元数据
+接口或 `file://` 路径。但要注意这层校验的边界——它只作用于交给我们的那个 URL，而实际抓取会跟随同协议的
+重定向，所以一个你已经信任的 issuer 仍然可以把 JWKS 请求重定向到内网的某个 `https` 地址。换句话说，
+信任一个 issuer 归根结底仍是对该 issuer 运营方的信任，服务端无法完全兜住。
+
 ## 故障排查
 
 | 现象 | 原因 / 处理 |
