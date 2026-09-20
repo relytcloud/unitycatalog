@@ -646,6 +646,35 @@ public class JwksOperationsTest {
   }
 
   @Test
+  public void theExternalJwksFileWarningsAreThrottledToo() throws Exception {
+    // The sibling of the throttle above, and on an even hotter path: AuthService calls
+    // knownIssuers() to derive the trusted issuers on EVERY token exchange, before it will look
+    // at the token, and /tokens is unauthenticated. Both of its failure branches -- the file is
+    // not there, the file does not parse -- describe a state that persists, so an ungated line in
+    // either is one WARN per request for as long as the file stays wrong.
+    Path missing = Path.of("/no/such/dir/uc-jwks-missing-" + System.nanoTime() + ".json");
+    ServerProperties missingProps = mock(ServerProperties.class);
+    when(missingProps.getExternalJwksFile()).thenReturn(missing.toString());
+    JwksOperations missingFileOps = new JwksOperations(mock(SecurityContext.class), missingProps);
+
+    Path unreadable = Files.createTempFile("uc-jwks-unreadable", ".json");
+    Files.writeString(unreadable, "<html>this is not a key set</html>");
+    ServerProperties unreadableProps = mock(ServerProperties.class);
+    when(unreadableProps.getExternalJwksFile()).thenReturn(unreadable.toString());
+    JwksOperations unreadableOps = new JwksOperations(mock(SecurityContext.class), unreadableProps);
+
+    try (CapturedLog log = CapturedLog.of(JwksOperations.class)) {
+      for (int request = 0; request < 5; request++) {
+        assertThat(missingFileOps.knownIssuers()).isEmpty();
+        assertThat(unreadableOps.knownIssuers()).isEmpty();
+      }
+
+      assertThat(log.messagesMentioning(Level.WARN, missing.toString())).hasSize(1);
+      assertThat(log.messagesMentioning(Level.WARN, unreadable.toString())).hasSize(1);
+    }
+  }
+
+  @Test
   public void remoteKeyLookupsAllowATenBurstAndRefillAtTenPerMinute() throws Exception {
     // JwkProviderBuilder.rateLimited's middle argument is the refill PERIOD for one token, not a
     // count per unit: BucketImpl.getRatePerToken() returns unit.toMillis(rate). The previous

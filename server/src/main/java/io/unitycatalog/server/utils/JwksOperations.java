@@ -135,6 +135,8 @@ public class JwksOperations {
 
   private final LogCooldown localKeyFileErrorCooldown = new LogCooldown(LOG_COOLDOWN);
 
+  private final LogCooldown jwksFileWarnCooldown = new LogCooldown(LOG_COOLDOWN);
+
   private final WebClient webClient = WebClient.builder().responseTimeout(HTTP_TIMEOUT).build();
   private static final ObjectMapper mapper = new ObjectMapper();
   private final SecurityContext securityContext;
@@ -971,7 +973,15 @@ public class JwksOperations {
     }
     Path jwksPath = Path.of(externalJwksFile);
     if (!Files.exists(jwksPath)) {
-      LOGGER.warn("Configured external JWKS file '{}' does not exist", jwksPath);
+      // Throttled, keyed on the file, for the same reason the key-lookup failures are: this
+      // method runs on EVERY token exchange -- AuthService calls it to derive the trusted issuers
+      // before it will look at a token at all -- and /tokens needs no credentials. A file that is
+      // absent or unreadable stays that way, so an ungated line here is one WARN per request for
+      // as long as the misconfiguration lasts, which is exactly the log-volume hole the cooldowns
+      // below the fold exist to close.
+      if (jwksFileWarnCooldown.allow(jwksPath.toString())) {
+        LOGGER.warn("Configured external JWKS file '{}' does not exist", jwksPath);
+      }
       return Set.of();
     }
     try {
@@ -985,7 +995,9 @@ public class JwksOperations {
       }
       return issuers;
     } catch (IOException e) {
-      LOGGER.warn("Failed to read external JWKS file '{}' for issuer discovery", jwksPath, e);
+      if (jwksFileWarnCooldown.allow(jwksPath.toString())) {
+        LOGGER.warn("Failed to read external JWKS file '{}' for issuer discovery", jwksPath, e);
+      }
       return Set.of();
     }
   }
