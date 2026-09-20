@@ -1,10 +1,24 @@
-name: Python Client Tests
+# Dependency licences can only change when the build definition changes, so this
+# runs on the build files rather than on every pull request. It used to be a step
+# inside the unit test matrix, where it cost ~4.5 minutes per leg on every change.
+
+name: License Check
 
 on:
   push:
     branches: [ "main", "branch-*" ]
+    paths:
+      - build.sbt
+      - version.sbt
+      - project/**
+      - .github/workflows/license-check.yml
   pull_request:
     branches: [ "main", "branch-*" ]
+    paths:
+      - build.sbt
+      - version.sbt
+      - project/**
+      - .github/workflows/license-check.yml
 
 permissions:
   contents: read
@@ -14,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  license-check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -34,11 +48,5 @@ jobs:
         path: build/sbt-launch-*.jar
         key: sbt-launcher-${{ hashFiles('project/build.properties') }}
 
-    - name: Install uv
-      run: bash dev/install-uv.sh
-
-    - name: Install Python 3.9 via uv
-      run: uv python install 3.9
-
-    - name: Generate the client library, install it, and run the tests
-      run: ./clients/python/run-tests.sh
+    - name: Run license check
+      run: build/sbt licenseCheck

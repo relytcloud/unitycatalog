@@ -2,13 +2,18 @@ name: Code Format Check
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "branch-*" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "branch-*" ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -20,6 +25,8 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '18'
+          cache: 'yarn'
+          cache-dependency-path: ui/yarn.lock
 
       - name: Run lint check
         run: |
@@ -27,6 +34,7 @@ jobs:
 
   java-fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -39,6 +47,14 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          # Caches ~/.sbt, ~/.ivy2/cache and ~/.cache/coursier.
+          cache: 'sbt'
+
+      - name: Cache the sbt launcher
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/sbt-launch-*.jar
+          key: sbt-launcher-${{ hashFiles('project/build.properties') }}
 
       - name: Run Java format check
         run: |

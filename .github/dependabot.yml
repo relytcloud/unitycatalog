@@ -1,0 +1,29 @@
+# sbt is not a supported ecosystem, so JVM dependencies in build.sbt still need
+# updating by hand. These cover the parts Dependabot can reach.
+
+version: 2
+updates:
+  # Action pins age out quietly: the checkout and setup-java pins currently in
+  # use target Node 20, which the runners have already deprecated.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+    groups:
+      ui-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
