@@ -58,7 +58,13 @@ acquire_sbt_jar () {
     printf 'Attempting to fetch sbt from %s\n' "${URL1}"
     JAR_DL="${JAR}.part"
     if [ $(command -v curl) ]; then
-      curl --fail --location --silent ${URL1} > "${JAR_DL}" &&\
+      # Retry: a single transient error from the artifact repository must not
+      # fail the build. --retry alone covers 5xx and timeouts; --retry-all-errors
+      # extends that to connection resets. --show-error keeps the HTTP status
+      # visible when every attempt fails.
+      curl --fail --location --silent --show-error \
+        --retry 5 --retry-all-errors --connect-timeout 10 \
+        ${URL1} > "${JAR_DL}" &&\
         mv "${JAR_DL}" "${JAR}"
     elif [ $(command -v wget) ]; then
       wget --quiet ${URL1} -O "${JAR_DL}" &&\
