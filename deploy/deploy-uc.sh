@@ -89,10 +89,27 @@ UC_TOKEN_URL="${UC_TOKEN_URL:-}"
 UC_REDIRECT_PORT="${UC_REDIRECT_PORT:-}"
 
 # Validate required values (paths are derived, so only real config/secrets are required).
+#
+# Emptiness is not the only way a value can be missing. uc.env.example ships its secrets as quoted
+# placeholders -- '<your-aliyun-access-key-id>' -- because the file has to be sourceable, and a
+# quoted placeholder is a perfectly good non-empty string. An unedited uc.env therefore passed this
+# check and deployed, with the placeholder rendered into server.properties as a literal credential;
+# the operator found out from an opaque STS error later, at the first OSS call, instead of here.
+# Anything still wearing angle brackets is a placeholder, so it is treated as not set.
+#
+# Only the NAME is ever printed. These values are secrets, and this output goes to consoles, CI
+# logs and deploy-log captures.
 missing=0
 for v in UC_HOME ALIYUN_REGION ALIYUN_ACCESS_KEY ALIYUN_SECRET_KEY ALIYUN_MASTER_ROLE_ARN \
          UC_AUDIENCES; do
-  if [ -z "${!v:-}" ]; then echo "ERROR: required variable not set: $v"; missing=1; fi
+  value="${!v:-}"
+  if [ -z "$value" ]; then
+    echo "ERROR: required variable not set: $v"
+    missing=1
+  elif [[ "$value" == *"<"*">"* ]]; then
+    echo "ERROR: required variable still holds the uc.env.example placeholder: $v"
+    missing=1
+  fi
 done
 [ "$missing" -eq 0 ] || { echo "Fill the missing variables in $ENV_FILE and re-run."; exit 1; }
 
@@ -134,8 +151,18 @@ if unknown:
     print("       Add them to the key list and the export line in deploy-uc.sh.", file=sys.stderr)
     sys.exit(1)
 
-for k in keys:
-    s = s.replace("${%s}" % k, os.environ.get(k, ""))
+# ONE pass over the template, so a value can never be rescanned. Substituting key by key with
+# str.replace re-read text it had already inserted: a value containing another key's placeholder
+# picked up that key's real value. UC_ALLOWED_ISSUERS='https://a.example/,${ALIYUN_SECRET_KEY}'
+# rendered the OSS secret into server.allowed-issuers -- a secret moved into an unrelated property,
+# from a file an operator does not think of as executable. The template-side check above cannot
+# catch it, because it reads the template, and the template is not where the placeholder was.
+#
+# re.sub with a FUNCTION as the replacement, never a string: a string replacement would itself be
+# scanned for backreferences, so a value containing \1 or \g<0> would be mangled or worse.
+# Every name that can match here was checked against `keys` above, and an unexported one renders
+# empty exactly as it did before.
+s = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", lambda m: os.environ.get(m.group(1), ""), s)
 open(out, "w", encoding="utf-8").write(s)
 PY
 }
