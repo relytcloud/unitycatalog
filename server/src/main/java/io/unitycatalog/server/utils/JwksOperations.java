@@ -108,6 +108,20 @@ public class JwksOperations {
    */
   private static final Duration LOG_COOLDOWN = Duration.ofSeconds(60);
 
+  /**
+   * JVM flag that admits a plain-http {@code jwks_uri} to a loopback host. Off unless it is set to
+   * {@code true}, so a production server accepts https and nothing else.
+   *
+   * <p>The exception exists for one thing: a test identity provider on loopback, which cannot
+   * present a certificate any JVM trusts. Left on by default it is a standing SSRF primitive --
+   * an identity provider this server already trusts, or anything that has taken one over, could
+   * publish {@code http://127.0.0.1:<port>/} as its jwks_uri and have the server issue blind GETs
+   * against its own loopback interface, one port at a time, with the outcome readable through the
+   * 401-vs-503 split. A javadoc saying "only for local tests" does not stop that; this flag does.
+   */
+  static final String ALLOW_PLAIN_HTTP_LOOPBACK_PROPERTY =
+      "io.unitycatalog.server.jwks.allowPlainHttpLoopback";
+
   private record CachedDiscovery(String jwksUri, JwkProvider provider, Instant fetchedAt) {}
 
   private final Map<String, CachedDiscovery> discoveryCache = new ConcurrentHashMap<>();
@@ -118,6 +132,8 @@ public class JwksOperations {
   private final LogCooldown fallthroughWarnCooldown = new LogCooldown(LOG_COOLDOWN);
 
   private final LogCooldown remoteKeyFetchWarnCooldown = new LogCooldown(LOG_COOLDOWN);
+
+  private final LogCooldown localKeyFileErrorCooldown = new LogCooldown(LOG_COOLDOWN);
 
   private final WebClient webClient = WebClient.builder().responseTimeout(HTTP_TIMEOUT).build();
   private static final ObjectMapper mapper = new ObjectMapper();
@@ -187,6 +203,28 @@ public class JwksOperations {
           ErrorCode.UNAVAILABLE, "Too many signing-key lookups; retry shortly.", e);
     } catch (JwkException e) {
       throw keyLookupFailure(resolved, issuer, e);
+    } catch (BaseException e) {
+      // Already classified: a token this server refuses (an 'alg' it cannot use), not a failure
+      // to obtain the key set. Re-thrown ahead of the net below so it keeps its own status.
+      throw e;
+    } catch (RuntimeException e) {
+      // The net. auth0's key-lookup exceptions are CHECKED and a sibling hierarchy of
+      // java-jwt's, so the two catches above cannot cover what com.auth0.jwk.Jwk throws from
+      // getPublicKey(): it declares only InvalidKeySpecException, NoSuchAlgorithmException and
+      // InvalidParameterSpecException, and for kty=RSA it first base64url-decodes the entry's
+      // "n" member. An entry with no "n" throws NullPointerException, a non-base64url "n"
+      // throws IllegalArgumentException, and an "n" that is a JSON number throws
+      // ClassCastException out of Jwk's own (String) cast -- all RuntimeExceptions, which
+      // reached GlobalExceptionHandler's RuntimeException branch and became a 500. A JWK whose
+      // material does not decode makes the key set unusable in exactly the way an unparseable
+      // one is, so it is classified by the same provenance rule: a server-configuration fault
+      // for a file this server owns, an upstream fault for a discovered key set.
+      //
+      // Deliberately the whole of RuntimeException rather than that list: the point is that NO
+      // failure of a third-party key decoder reaches a caller as a stack trace, and the list of
+      // what it can throw is not ours to keep in step. A null "kty" lands here too, via the
+      // switch in algorithmForJwk, and an unusable key set is the right answer for it.
+      throw unusableKeySet(resolved, issuer, e);
     }
 
     Verification builder = JWT.require(algorithm).withIssuer(issuer);
@@ -238,12 +276,34 @@ public class JwksOperations {
           "No signing key matching the token's 'kid' is registered for issuer " + issuer,
           cause);
     }
+    return unusableKeySet(resolved, issuer, cause);
+  }
+
+  /**
+   * The key set itself could not be produced, so nothing has been decided about the caller's
+   * token. Whose fault that is follows from the PROVENANCE alone: a file this server owns is the
+   * server's own misconfiguration, and anything discovered is upstream.
+   *
+   * <p>Reached both from {@link #keyLookupFailure}, for the auth0 failures that mean "no key set",
+   * and from {@link #verifierForIssuerAndKey}'s RuntimeException net, for a key whose material
+   * does not decode. Same fault, same answer.
+   *
+   * <p>BOTH log lines are throttled per issuer. The remote one always was; the local one was not,
+   * and it is on the hotter path of the two -- {@code AuthDecorator} resolves INTERNAL on every
+   * authenticated route and /tokens reaches it with no credentials at all, so a deleted certs.json
+   * meant one ERROR, with a stack trace, per request, for as long as the file stayed missing. That
+   * is a caller-driven log-volume hole and it buries the one line an operator needs. Once a minute
+   * per issuer says everything the first line said.
+   */
+  private BaseException unusableKeySet(ResolvedProvider resolved, String issuer, Throwable cause) {
     if (resolved.source().isLocalFile()) {
-      LOGGER.error(
-          "Issuer '{}': could not read signing keys from local file '{}'",
-          issuer,
-          resolved.location(),
-          cause);
+      if (localKeyFileErrorCooldown.allow(issuer)) {
+        LOGGER.error(
+            "Issuer '{}': could not read signing keys from local file '{}'",
+            issuer,
+            resolved.location(),
+            cause);
+      }
       // Deliberately generic. This is reached from AuthDecorator on every authenticated route,
       // and any garbage bearer token gets there, so the caller is effectively unauthenticated:
       // naming the file would hand out a server filesystem path, and cause.getMessage() carries
@@ -301,7 +361,31 @@ public class JwksOperations {
     return !message.startsWith(NO_KEYS_IN_SET) && !message.equals(UNPARSEABLE_KEY_SET);
   }
 
+  /**
+   * The verification algorithm for a key, chosen by the algorithm the TOKEN names.
+   *
+   * @param alg the token header's {@code alg}, which is attacker-supplied and may be absent
+   */
   private Algorithm algorithmForJwk(Jwk jwk, String alg) throws InvalidPublicKeyException {
+    // A JWT header is not required to carry an "alg" member: JWT.decode accepts one that does
+    // not, and DecodedJWT.getAlgorithm() then returns null. A String switch on null throws
+    // NullPointerException -- a RuntimeException, and so a sibling of every exception
+    // verifierForIssuerAndKey used to catch -- which reached GlobalExceptionHandler's
+    // RuntimeException branch and answered with a 500 carrying the NPE's stack trace. Every
+    // route could be made to do it: AuthDecorator runs on all of them, and /tokens needs no
+    // credentials at all. (A null 'kid' gets this far too -- UrlJwkProvider.get(null) returns
+    // the sole key when the set holds exactly one, which is what certs.json holds.)
+    //
+    // Naming no algorithm is a token this server cannot verify, which is the same answer as
+    // naming one it does not support: 401, at DEBUG, because any caller can produce it at will.
+    if (alg == null || alg.isBlank()) {
+      LOGGER.debug("Token rejected: no 'alg' in the token header");
+      throw new OAuthInvalidClientException(
+          ErrorCode.UNAUTHENTICATED, "The token header names no signature algorithm.");
+    }
+    // Not null-guarded: Jwk.fromValues rejects an entry with no "kty" before one can get here, so
+    // a null would mean the key set is unusable rather than the token unverifiable -- which is
+    // exactly what the RuntimeException net in verifierForIssuerAndKey concludes for the NPE.
     String keyType = jwk.getType();
 
     return switch (keyType) {
@@ -309,14 +393,14 @@ public class JwksOperations {
         case "RS256" -> Algorithm.RSA256((RSAPublicKey) jwk.getPublicKey(), null);
         case "RS384" -> Algorithm.RSA384((RSAPublicKey) jwk.getPublicKey(), null);
         case "RS512" -> Algorithm.RSA512((RSAPublicKey) jwk.getPublicKey(), null);
-        default -> throw new OAuthInvalidClientException(ErrorCode.ABORTED,
+        default -> throw new OAuthInvalidClientException(ErrorCode.UNAUTHENTICATED,
                 String.format("Unsupported RSA algorithm: %s", alg));
       };
       case "EC" -> switch (alg) {
         case "ES256" -> Algorithm.ECDSA256((ECPublicKey) jwk.getPublicKey(), null);
         case "ES384" -> Algorithm.ECDSA384((ECPublicKey) jwk.getPublicKey(), null);
         case "ES512" -> Algorithm.ECDSA512((ECPublicKey) jwk.getPublicKey(), null);
-        default -> throw new OAuthInvalidClientException(ErrorCode.ABORTED,
+        default -> throw new OAuthInvalidClientException(ErrorCode.UNAUTHENTICATED,
                 String.format("Unsupported ECDSA algorithm: %s", alg));
       };
       default -> throw new OAuthInvalidClientException(ErrorCode.ABORTED,
@@ -578,8 +662,11 @@ public class JwksOperations {
    * The rule is:
    *
    * <ul>
-   *   <li>{@code https} to a host that is not loopback, link-local, any-local or private: allowed
-   *   <li>{@code http} to a loopback host: allowed, and only so a local test IdP still works
+   *   <li>{@code https} to a host that is not loopback, link-local, any-local, private, carrier-
+   *       grade NAT, benchmarking, multicast or an IPv6 form embedding one of those: allowed
+   *   <li>{@code http} to a loopback host: allowed ONLY while {@link
+   *       #ALLOW_PLAIN_HTTP_LOOPBACK_PROPERTY} is set, which is a test-only flag; a production
+   *       server takes https and nothing else
    *   <li>everything else, including {@code https://169.254.169.254} and the RFC 1918 ranges:
    *       rejected
    * </ul>
@@ -593,6 +680,15 @@ public class JwksOperations {
    * the scheme or the class of address -- what an operator needs -- and nothing more.
    */
   private static URL validatedJwksUrl(String jwksUri, String issuer) {
+    return validatedJwksUrl(jwksUri, issuer, plainHttpLoopbackAllowed());
+  }
+
+  /**
+   * The rule itself, with the plain-http exception passed in rather than read from the JVM, so a
+   * test can assert what a server WITHOUT the flag does without mutating global state that another
+   * test running beside it would see.
+   */
+  static URL validatedJwksUrl(String jwksUri, String issuer, boolean allowPlainHttpLoopback) {
     URI uri;
     try {
       uri = new URI(jwksUri);
@@ -625,23 +721,30 @@ public class JwksOperations {
 
     String host = uri.getHost();
     if (host == null || host.isBlank()) {
-      // Also the fail-closed answer for an authority Java declines to parse into a host.
+      // Also the fail-closed answer for an authority Java declines to parse into a host, which is
+      // every case where URI and URL disagree about what the host is: URI is the stricter parser
+      // of the two, so anything it will not read (an underscore in a name, a second '@', a
+      // non-ASCII full stop) is refused here rather than reaching URL's more forgiving one.
       LOGGER.debug("Issuer '{}': jwks_uri has no usable host: '{}'", issuer, jwksUri);
       throw new OAuthInvalidRequestException(
           ErrorCode.UNAVAILABLE,
           "Identity provider published a jwks_uri with no usable host, for issuer " + issuer);
     }
 
-    boolean loopback = isLoopbackHost(host);
-    if ("http".equals(scheme) && !loopback) {
-      LOGGER.debug("Issuer '{}': rejected plain-http jwks_uri '{}'", issuer, jwksUri);
-      throw new OAuthInvalidRequestException(
-          ErrorCode.UNAVAILABLE,
-          "Identity provider published a plain-http jwks_uri to a non-loopback host, for issuer "
-              + issuer
-              + "; only https is accepted");
+    if ("http".equals(scheme)) {
+      if (!(allowPlainHttpLoopback && isLoopbackHost(host))) {
+        LOGGER.debug("Issuer '{}': rejected plain-http jwks_uri '{}'", issuer, jwksUri);
+        throw new OAuthInvalidRequestException(
+            ErrorCode.UNAVAILABLE,
+            "Identity provider published a plain-http jwks_uri, for issuer "
+                + issuer
+                + "; only https is accepted");
+      }
+      // The test identity provider, explicitly enabled. Returned here rather than falling
+      // through, because the check below rejects loopback -- which is the whole point of it.
+      return asUrl(uri, jwksUri, issuer);
     }
-    if ("https".equals(scheme) && isInternalAddress(host)) {
+    if (isInternalAddress(host)) {
       LOGGER.debug("Issuer '{}': rejected internal-address jwks_uri '{}'", issuer, jwksUri);
       throw new OAuthInvalidRequestException(
           ErrorCode.UNAVAILABLE,
@@ -649,7 +752,25 @@ public class JwksOperations {
               + " address, for issuer "
               + issuer);
     }
+    return asUrl(uri, jwksUri, issuer);
+  }
 
+  /** Whether the plain-http-to-loopback exception is enabled in this JVM. */
+  private static boolean plainHttpLoopbackAllowed() {
+    return plainHttpLoopbackAllowed(System.getProperty(ALLOW_PLAIN_HTTP_LOOPBACK_PROPERTY));
+  }
+
+  /**
+   * How the flag's value is read: only the exact string {@code true} turns it on, so an unset
+   * property, an empty one, and anything else all leave the exception off. Separated from the
+   * lookup so the default -- the one that governs every real deployment -- is itself testable in a
+   * JVM where the tests have set the property.
+   */
+  static boolean plainHttpLoopbackAllowed(String propertyValue) {
+    return "true".equalsIgnoreCase(propertyValue);
+  }
+
+  private static URL asUrl(URI uri, String jwksUri, String issuer) {
     try {
       return uri.toURL();
     } catch (MalformedURLException | IllegalArgumentException e) {
@@ -666,8 +787,8 @@ public class JwksOperations {
    * is what a local test IdP is reached by; everything else must be a loopback literal.
    */
   private static boolean isLoopbackHost(String host) {
-    String bare = stripBrackets(host);
-    if (bare.equalsIgnoreCase("localhost")) {
+    String bare = normalizeHost(host);
+    if (bare.equals("localhost")) {
       return true;
     }
     InetAddress literal = literalAddress(bare);
@@ -676,14 +797,15 @@ public class JwksOperations {
 
   /**
    * Whether a URI host names an address this server must never fetch from: loopback, link-local
-   * (which is where 169.254.169.254, the cloud metadata address, lives), any-local, or a private /
-   * unique-local range. A DNS name that is not {@code localhost} is not classified -- see {@link
-   * #validatedJwksUrl} on why it is not resolved.
+   * (which is where 169.254.169.254, the cloud metadata address, lives), any-local, private,
+   * shared/carrier-grade-NAT, benchmarking, multicast, or an IPv6 form that embeds one of those. A
+   * DNS name that is not {@code localhost} is not classified -- see {@link #validatedJwksUrl} on
+   * why it is not resolved.
    */
   private static boolean isInternalAddress(String host) {
-    String bare = stripBrackets(host);
-    String lower = bare.toLowerCase(Locale.ROOT);
-    if (lower.equals("localhost") || lower.endsWith(".localhost")) {
+    String bare = normalizeHost(host);
+    // Empty is what a host of "." normalizes to: nothing usable, so fail closed.
+    if (bare.isEmpty() || bare.equals("localhost") || bare.endsWith(".localhost")) {
       return true;
     }
     InetAddress literal = literalAddress(bare);
@@ -693,12 +815,82 @@ public class JwksOperations {
     if (literal.isLoopbackAddress()
         || literal.isLinkLocalAddress()
         || literal.isAnyLocalAddress()
-        || literal.isSiteLocalAddress()) {
+        || literal.isSiteLocalAddress()
+        // 224.0.0.0/4 and ff00::/8. A multicast fetch is never a key set and can be a way to
+        // reach listeners on a local segment.
+        || literal.isMulticastAddress()) {
       return true;
     }
-    // IPv6 unique-local (fc00::/7). isSiteLocalAddress only covers the deprecated fec0::/10.
     byte[] octets = literal.getAddress();
-    return octets.length == 16 && (octets[0] & 0xFE) == 0xFC;
+    if (octets.length == 4) {
+      return isInternalIpv4(octets);
+    }
+    // IPv6 unique-local (fc00::/7). isSiteLocalAddress only covers the deprecated fec0::/10.
+    if ((octets[0] & 0xFE) == 0xFC) {
+      return true;
+    }
+    byte[] embedded = embeddedIpv4(octets);
+    return embedded != null && isInternalIpv4(embedded);
+  }
+
+  /**
+   * The IPv4 ranges that must never be fetched from, as raw octets so this serves both a literal
+   * IPv4 host and the IPv4 address an IPv6 one embeds.
+   *
+   * <p>The first five duplicate what {@link InetAddress}'s own predicates answer for a literal and
+   * are listed anyway, because for an embedded address there is no {@code InetAddress} to ask. The
+   * rest are ranges those predicates do not cover at all, and every one of them reaches something:
+   * 100.64.0.0/10 is where carrier-grade NAT and a great many cloud-internal and Kubernetes
+   * networks live, 192.0.0.0/24 holds IETF protocol assignments, and 198.18.0.0/15 is the
+   * benchmarking range that appears inside service meshes.
+   */
+  private static boolean isInternalIpv4(byte[] octets) {
+    int first = octets[0] & 0xFF;
+    int second = octets[1] & 0xFF;
+    int third = octets[2] & 0xFF;
+    return first == 0 // "this network", including 0.0.0.0
+        || first == 127 // loopback
+        || first == 10 // RFC 1918
+        || (first == 172 && second >= 16 && second <= 31) // RFC 1918
+        || (first == 192 && second == 168) // RFC 1918
+        || (first == 169 && second == 254) // link-local, incl. the cloud metadata address
+        || (first == 100 && second >= 64 && second <= 127) // 100.64.0.0/10, carrier-grade NAT
+        || (first == 192 && second == 0 && third == 0) // 192.0.0.0/24, IETF protocol assignments
+        || (first == 198 && (second == 18 || second == 19)) // 198.18.0.0/15, benchmarking
+        || first >= 224; // multicast and the reserved 240.0.0.0/4
+  }
+
+  /**
+   * The IPv4 address an IPv6 address embeds in its low 32 bits, or null if it embeds none.
+   *
+   * <p>{@code 64:ff9b::/96} is the well-known NAT64 prefix: a translator on the path forwards it
+   * to the embedded IPv4 address, so {@code [64:ff9b::7f00:1]} is a way of writing 127.0.0.1 that
+   * none of {@link InetAddress}'s predicates recognise. {@code ::/96} is the deprecated
+   * IPv4-compatible form and is treated the same way, because it costs one comparison and the
+   * deprecation is not enforced by anything this code can see. {@code ::ffff:0:0/96}, the
+   * IPv4-MAPPED form, needs no case here: {@code InetAddress.getByName} returns an {@code
+   * Inet4Address} for it, so it is classified as IPv4 before this is reached.
+   */
+  private static byte[] embeddedIpv4(byte[] octets) {
+    boolean nat64 =
+        octets[0] == 0x00
+            && octets[1] == 0x64
+            && octets[2] == (byte) 0xFF
+            && octets[3] == (byte) 0x9B
+            && allZero(octets, 4, 12);
+    if (!nat64 && !allZero(octets, 0, 12)) {
+      return null;
+    }
+    return new byte[] {octets[12], octets[13], octets[14], octets[15]};
+  }
+
+  private static boolean allZero(byte[] octets, int from, int to) {
+    for (int i = from; i < to; i++) {
+      if (octets[i] != 0) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -715,6 +907,27 @@ public class JwksOperations {
     } catch (UnknownHostException e) {
       return null;
     }
+  }
+
+  /**
+   * A URI host reduced to the form the classifiers compare against: no brackets, no trailing root
+   * dot, lower case.
+   *
+   * <p>The trailing dot is the one that mattered. {@code https://localhost./keys} parses to the
+   * host {@code localhost.}, which equals neither {@code localhost} nor anything ending {@code
+   * .localhost}, so it walked straight through the internal-address check -- and then {@code
+   * InetAddress.getByName} resolved it to 127.0.0.1, because a trailing dot is simply the DNS root
+   * written out. One character was the whole bypass. (A literal cannot be spelt this way: {@code
+   * URI.getHost()} returns null for {@code https://127.0.0.1./}, which is refused earlier as an
+   * unusable host.)
+   */
+  private static String normalizeHost(String host) {
+    String bare = stripBrackets(host);
+    int end = bare.length();
+    while (end > 0 && bare.charAt(end - 1) == '.') {
+      end--;
+    }
+    return bare.substring(0, end).toLowerCase(Locale.ROOT);
   }
 
   /** {@code URI.getHost()} keeps the brackets around an IPv6 literal; the classifiers cannot. */

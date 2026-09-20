@@ -1,5 +1,6 @@
 package io.unitycatalog.server.utils;
 
+import static io.unitycatalog.server.security.SecurityContext.Issuers.INTERNAL;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -367,7 +368,11 @@ public class JwksOperationsTest {
     }
 
     List<String> infoMessagesMentioning(String needle) {
-      return appender.messagesAt(Level.INFO).stream().filter(m -> m.contains(needle)).toList();
+      return messagesMentioning(Level.INFO, needle);
+    }
+
+    List<String> messagesMentioning(Level level, String needle) {
+      return appender.messagesAt(level).stream().filter(m -> m.contains(needle)).toList();
     }
 
     @Override
@@ -518,6 +523,125 @@ public class JwksOperationsTest {
           .hasMessageNotContaining(hostThatMustNotLeak)
           .extracting(e -> ((BaseException) e).getErrorCode())
           .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void jwksUriWithATrailingDotOnTheHostIsRejected() throws Exception {
+    // One character was the whole bypass. "localhost." is the same name as "localhost" -- the dot
+    // is the DNS root written out, and InetAddress.getByName resolves it to 127.0.0.1 -- but it
+    // equals neither "localhost" nor anything ending ".localhost", so it walked straight through
+    // a check that named both. Anything reached by name can be spelt this way.
+    assertJwksUriRejected("https://localhost./keys", "localhost");
+    assertJwksUriRejected("https://LOCALHOST./keys", "LOCALHOST");
+    assertJwksUriRejected("https://anything.localhost./keys", "anything.localhost");
+  }
+
+  @Test
+  public void jwksUriInARangeThatReachesSomethingInternalIsRejected() throws Exception {
+    // Ranges none of InetAddress's own predicates answer for, every one of which routes to
+    // something inside a real deployment.
+    assertJwksUriRejected("https://100.64.0.1/keys", "100.64.0.1"); // carrier-grade NAT
+    assertJwksUriRejected("https://100.127.255.254/keys", "100.127.255.254"); // ..to the end of /10
+    assertJwksUriRejected("https://192.0.0.1/keys", "192.0.0.1"); // IETF protocol assignments
+    assertJwksUriRejected("https://198.18.0.1/keys", "198.18.0.1"); // benchmarking
+    assertJwksUriRejected("https://198.19.255.255/keys", "198.19.255.255"); // ..to the end of /15
+    assertJwksUriRejected("https://224.0.0.1/keys", "224.0.0.1"); // multicast
+    assertJwksUriRejected("https://[ff02::1]/keys", "ff02::1"); // all-nodes multicast
+  }
+
+  @Test
+  public void jwksUriUsingAnIpv6FormThatEmbedsAnInternalIpv4AddressIsRejected() throws Exception {
+    // 64:ff9b::/96 is the well-known NAT64 prefix: a translator on the path forwards it to the
+    // IPv4 address in the low 32 bits, so [64:ff9b::7f00:1] is a way of writing 127.0.0.1 that
+    // isLoopbackAddress() says nothing about. ::/96 is the same trick in the deprecated
+    // IPv4-compatible form.
+    assertJwksUriRejected("https://[64:ff9b::7f00:1]/keys", "64:ff9b"); // 127.0.0.1
+    assertJwksUriRejected("https://[64:ff9b::a9fe:a9fe]/keys", "64:ff9b"); // 169.254.169.254
+    assertJwksUriRejected("https://[::7f00:1]/keys", "7f00"); // 127.0.0.1, IPv4-compatible
+  }
+
+  @Test
+  public void anIpv6FormEmbeddingAPublicAddressIsStillAllowed() throws Exception {
+    // The embedded-address rule classifies what is embedded; it does not reject the whole prefix.
+    // Without this, "reject 64:ff9b::/96" and "reject the loopback inside it" are the same test.
+    assertThat(JwksOperations.validatedJwksUrl("https://[64:ff9b::808:808]/keys", "iss", false))
+        .hasToString("https://[64:ff9b::808:808]/keys"); // 8.8.8.8
+  }
+
+  @Test
+  public void plainHttpIsRejectedWithoutTheLoopbackTestFlagEvenOnLoopback() throws Exception {
+    // The exception for a local test IdP was on by default, gated by nothing but a javadoc. That
+    // makes a trusted-but-compromised identity provider into a loopback port scanner: it publishes
+    // http://127.0.0.1:<port>/ as its jwks_uri and reads the answer off the 401-vs-503 split.
+    // Asserted by passing the flag's value in, so that the production rule is tested in a JVM
+    // whose system property the build sets the other way.
+    for (String uri :
+        List.of(
+            "http://127.0.0.1:9999/keys",
+            "http://localhost:9999/keys",
+            "http://localhost./keys",
+            "http://[::1]:9999/keys")) {
+      assertThatThrownBy(() -> JwksOperations.validatedJwksUrl(uri, "https://idp.example", false))
+          .as(uri)
+          .isInstanceOf(BaseException.class)
+          .hasMessageContaining("only https is accepted")
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+
+    // And with the flag on it is admitted, which is what keeps DiscoveryTestServer working.
+    assertThat(JwksOperations.validatedJwksUrl("http://127.0.0.1:9999/keys", "iss", true))
+        .hasToString("http://127.0.0.1:9999/keys");
+  }
+
+  @Test
+  public void theLoopbackExceptionIsOffUnlessThePropertyIsExactlyTrue() {
+    // The default is what governs every real deployment, so it is the part worth pinning: absent,
+    // empty, "1", "yes" and "TRUE" must not be read as agreement with anything but the last.
+    assertThat(JwksOperations.plainHttpLoopbackAllowed(null)).isFalse();
+    assertThat(JwksOperations.plainHttpLoopbackAllowed("")).isFalse();
+    assertThat(JwksOperations.plainHttpLoopbackAllowed("1")).isFalse();
+    assertThat(JwksOperations.plainHttpLoopbackAllowed("yes")).isFalse();
+    assertThat(JwksOperations.plainHttpLoopbackAllowed("false")).isFalse();
+    assertThat(JwksOperations.plainHttpLoopbackAllowed("true")).isTrue();
+    assertThat(JwksOperations.plainHttpLoopbackAllowed("TRUE")).isTrue();
+  }
+
+  @Test
+  public void anOrdinaryPublicHttpsJwksUriIsStillAccepted() throws Exception {
+    // The other half of every rejection above: a guard that refuses everything is not a guard.
+    assertThat(JwksOperations.validatedJwksUrl("https://login.example/keys", "iss", false))
+        .hasToString("https://login.example/keys");
+    assertThat(JwksOperations.validatedJwksUrl("https://8.8.8.8/keys", "iss", false))
+        .hasToString("https://8.8.8.8/keys");
+    // A name that merely CONTAINS localhost is not localhost.
+    assertThat(JwksOperations.validatedJwksUrl("https://notlocalhost.example/k", "iss", false))
+        .hasToString("https://notlocalhost.example/k");
+  }
+
+  @Test
+  public void theLocalKeyFileErrorIsThrottledLikeItsRemoteTwin() throws Exception {
+    // AuthDecorator resolves the INTERNAL issuer on every authenticated route, and /tokens
+    // reaches the same code with no credentials at all, so a certs.json that is missing or
+    // unreadable fails EVERY request. The remote twin of this branch has been throttled from the
+    // start; this one logged an ERROR, with a stack trace, once per request -- a log-volume hole
+    // any caller could hold open, burying the one line an operator needs to read.
+    Path missing = Path.of("/no/such/dir/uc-certs-throttle-" + System.nanoTime() + ".json");
+    SecurityContext securityContext = mock(SecurityContext.class);
+    when(securityContext.getCertsFile()).thenReturn(missing);
+    JwksOperations ops = new JwksOperations(securityContext);
+
+    try (CapturedLog log = CapturedLog.of(JwksOperations.class)) {
+      for (int request = 0; request < 5; request++) {
+        assertThatThrownBy(
+                () -> ops.verifierForIssuerAndKey(INTERNAL, "any-kid", "RS256", List.of()))
+            .isInstanceOf(BaseException.class);
+      }
+
+      // Five failed requests, one line. The failure itself is still reported every time -- the
+      // caller gets a 500 each time -- it is only the logging that is once per issuer per window.
+      assertThat(log.messagesMentioning(Level.ERROR, missing.toString())).hasSize(1);
     }
   }
 

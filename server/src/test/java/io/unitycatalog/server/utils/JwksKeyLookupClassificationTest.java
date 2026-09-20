@@ -57,6 +57,19 @@ public class JwksKeyLookupClassificationTest {
     return issuer == null ? base + "}" : base + String.format(",\"issuer\":\"%s\"}", issuer);
   }
 
+  /**
+   * An RSA entry whose {@code n} is whatever is passed -- including nothing at all, which is the
+   * point: {@code Jwk.fromValues} validates only {@code kty}, so an entry with no key material is
+   * accepted into the key set and only falls over when it is asked for a public key.
+   */
+  private static String rsaEntry(String kid, String modulus, String issuer) {
+    String base = String.format("{\"kty\":\"RSA\",\"kid\":\"%s\",\"e\":\"AQAB\"", kid);
+    if (modulus != null) {
+      base += String.format(",\"n\":\"%s\"", modulus);
+    }
+    return issuer == null ? base + "}" : base + String.format(",\"issuer\":\"%s\"}", issuer);
+  }
+
   private static Path fileWith(String contents) throws Exception {
     Path file = Files.createTempFile("uc-jwks", ".json");
     Files.writeString(file, contents);
@@ -269,6 +282,121 @@ public class JwksKeyLookupClassificationTest {
                       ops.verifierForIssuerAndKey(idp.issuer(), "no-such-kid", "ES256", List.of())))
           .doesNotContain(idp.issuer() + "/keys");
     }
+  }
+
+  @Test
+  public void tokenNamingNoAlgorithmIsRejectedRatherThanFaultingTheServer() throws Exception {
+    // A JWT header need not carry an "alg": JWT.decode accepts one that does not, and
+    // DecodedJWT.getAlgorithm() returns null for it. That null reached a String switch, which
+    // threw NullPointerException -- a RuntimeException, so neither catch in
+    // verifierForIssuerAndKey covered it and GlobalExceptionHandler answered 500. A null 'kid'
+    // gets this far as well: UrlJwkProvider.get(null) returns the sole key when the set holds
+    // exactly one, which is what certs.json holds.
+    //
+    // Naming no algorithm is a token this server cannot verify. That is a 401.
+    Path jwksFile = fileWith("{\"keys\":[" + entry("kidA", "issuer-a") + "]}");
+    JwksOperations ops = opsWithJwksFile(jwksFile);
+
+    assertThatThrownBy(() -> ops.verifierForIssuerAndKey("issuer-a", "kidA", null, List.of()))
+        .isInstanceOf(BaseException.class)
+        .extracting(e -> ((BaseException) e).getErrorCode())
+        .isEqualTo(ErrorCode.UNAUTHENTICATED);
+
+    // Blank is the same thing said differently -- '{"alg":""}' decodes to an empty string, not a
+    // null, so a null-only guard would let it straight back into the switch.
+    assertThatThrownBy(() -> ops.verifierForIssuerAndKey("issuer-a", "kidA", "  ", List.of()))
+        .isInstanceOf(BaseException.class)
+        .extracting(e -> ((BaseException) e).getErrorCode())
+        .isEqualTo(ErrorCode.UNAUTHENTICATED);
+  }
+
+  @Test
+  public void anAlgorithmThisServerDoesNotSupportIsRejectedAsATokenFault() throws Exception {
+    // Same answer for an 'alg' that is present and unusable, including one from the other key
+    // family: the key pins the family, so RS256 against an EC key is not a 500 and not a server
+    // fault, it is a token that cannot be verified with the key it names.
+    Path jwksFile = fileWith("{\"keys\":[" + entry("kidA", "issuer-a") + "]}");
+    JwksOperations ops = opsWithJwksFile(jwksFile);
+
+    for (String alg : List.of("HS256", "none", "RS256")) {
+      assertThatThrownBy(() -> ops.verifierForIssuerAndKey("issuer-a", "kidA", alg, List.of()))
+          .as("alg %s", alg)
+          .isInstanceOf(BaseException.class)
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAUTHENTICATED);
+    }
+  }
+
+  @Test
+  public void nullAlgorithmNeverReachesTheCallerAsAStackTrace() throws Exception {
+    // The response a caller actually receives for the above, rendered by the real handler: a 401
+    // body, and nothing of the NullPointerException that used to be in it.
+    Path jwksFile = fileWith("{\"keys\":[" + entry("kidA", "issuer-a") + "]}");
+    JwksOperations ops = opsWithJwksFile(jwksFile);
+
+    String body =
+        responseBodyFor(() -> ops.verifierForIssuerAndKey("issuer-a", "kidA", null, List.of()));
+
+    assertThat(body).doesNotContain("NullPointerException");
+    assertThat(body).doesNotContain("JwksOperations.java");
+    assertThat(body).contains("UNAUTHENTICATED");
+  }
+
+  @Test
+  public void localKeyWhoseMaterialDoesNotDecodeIsAServerFault() throws Exception {
+    // Jwk.getPublicKey() declares InvalidKeySpecException, NoSuchAlgorithmException and
+    // InvalidParameterSpecException -- and, for kty=RSA, base64url-decodes the "n" member before
+    // any of those can be thrown. An entry with no "n" throws NullPointerException and one whose
+    // "n" is not base64url throws IllegalArgumentException: both RuntimeExceptions, so both
+    // escaped catch (JwkException) and surfaced as a 500 carrying a stack trace.
+    //
+    // A key set holding an entry that cannot be decoded is an unusable key set, and for a file
+    // this server owns that is the server's own misconfiguration -- the same answer, by the same
+    // provenance rule, as a key set that does not parse at all.
+    for (String modulus : new String[] {null, "!!!not-base64url!!!"}) {
+      Path jwksFile = fileWith("{\"keys\":[" + rsaEntry("kidR", modulus, "issuer-a") + "]}");
+      JwksOperations ops = opsWithJwksFile(jwksFile);
+
+      assertThatThrownBy(() -> ops.verifierForIssuerAndKey("issuer-a", "kidR", "RS256", List.of()))
+          .as("modulus %s", modulus)
+          .isInstanceOf(BaseException.class)
+          .hasMessageNotContaining(jwksFile.toString())
+          .hasMessageContaining("server key-configuration problem")
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.INTERNAL);
+    }
+  }
+
+  @Test
+  public void remoteKeyWhoseMaterialDoesNotDecodeIsAnUpstreamFault() throws Exception {
+    // The sibling of the case above, and the one an attacker reaches without touching the server:
+    // a discovered identity provider publishing an entry with no usable material. Same class of
+    // RuntimeException, different provenance, so a different answer -- upstream, not us.
+    try (DiscoveryTestServer idp =
+        new DiscoveryTestServer("{\"keys\":[" + rsaEntry("kidR", null, null) + "]}")) {
+      JwksOperations ops =
+          opsWithJwksFile(fileWith("{\"keys\":[" + entry("kidLocal", "other-issuer") + "]}"));
+
+      assertThatThrownBy(
+              () -> ops.verifierForIssuerAndKey(idp.issuer(), "kidR", "RS256", List.of()))
+          .isInstanceOf(BaseException.class)
+          .hasMessageNotContaining(idp.issuer() + "/keys")
+          .extracting(e -> ((BaseException) e).getErrorCode())
+          .isEqualTo(ErrorCode.UNAVAILABLE);
+    }
+  }
+
+  @Test
+  public void anUndecodableKeyNeverReachesTheCallerAsAStackTrace() throws Exception {
+    Path jwksFile = fileWith("{\"keys\":[" + rsaEntry("kidR", null, "issuer-a") + "]}");
+    JwksOperations ops = opsWithJwksFile(jwksFile);
+
+    String body =
+        responseBodyFor(() -> ops.verifierForIssuerAndKey("issuer-a", "kidR", "RS256", List.of()));
+
+    assertThat(body).doesNotContain("NullPointerException");
+    assertThat(body).doesNotContain("com.auth0.jwk.Jwk");
+    assertThat(body).doesNotContain(jwksFile.toString());
   }
 
   /** The bytes a caller receives for a failure, rendered by the real exception handler. */
