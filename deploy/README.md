@@ -57,7 +57,7 @@ authorization is on. `200` means authorization is **off** — check `UC_AUTHORIZ
 ## Running the UI
 
 `deploy-uc.sh` starts the **server only**. The bundled web UI is served by `ui/server.js`, which
-proxies `/api` to the UC server and injects the admin token so the browser needs no login.
+proxies `/api` to the UC server. It adds no credentials: every visitor signs in for themselves.
 
 The container image entrypoint [`bin/start-uc-with-ui.sh`](../bin/start-uc-with-ui.sh) runs both
 processes when `UC_ENABLE_UI` is truthy (`1`/`true`/`yes`/`on`); otherwise it runs the server alone:
@@ -71,13 +71,12 @@ and start the UI server yourself:
 
 ```bash
 cd ui && yarn install && yarn build && cd ..
-UC_TARGET=http://localhost:8088 \
-UC_TOKEN_FILE="$UC_HOME/etc/conf/token.txt" \
+UC_TARGET=http://localhost:8089 \
 PORT=3000 HOST=0.0.0.0 node ui/server.js
 ```
 
-> ⚠️ **The UI injects the admin token into every API call, so anyone who can reach it is a Unity
-> Catalog admin with no login.** Keep port `3000` on a trusted network; never expose it publicly.
+> ⚠️ **With authorization off, the server asks for nothing and neither does the UI.** Keep port
+> `3000` on a trusted network; never expose it publicly.
 
 ## Files
 
@@ -100,7 +99,13 @@ PORT=3000 HOST=0.0.0.0 node ui/server.js
 | `UC_AUTHORIZATION` | no | `enable` (default) / `disable` |
 | `UC_ALLOWED_ISSUERS` | no | **optional** extra trusted issuers (comma-separated). Trusted issuers are derived primarily from the JWKS file (each key's `issuer` member, hot-reloaded); this list is a **union** on top, only for issuers **not** in the local JWKS (e.g. OIDC discovery). **Leave empty for Relyt** — the JWKS alone governs trust, and onboarding a DWSU means appending a key (hot-reloaded, no restart, no change here) |
 | `UC_AUDIENCES` | **yes** | audience of the subject token, e.g. `unitycatalog-server` (must match the signer's `unity.audience`) |
-| `UC_ACCESS_TOKEN_TTL` | no | lifetime of exchanged tokens (ISO-8601, e.g. `PT1H`). A **blank** value means **no expiry**; `uc.env.example` ships `PT1H` deliberately — keep it unless you have a reason not to |
+| `UC_ACCESS_TOKEN_TTL` | no | lifetime of exchanged tokens, **ISO-8601** (`PT12H`, `PT30M`; `12h` is rejected). Blank = **no expiry**. One value for every caller — the coordinator and the UI. `uc.env.example` ships `PT12H`, which is the value to deploy: the coordinator's exp-based refresh path had not run in production when this was chosen, so the default leaves headroom. Shorten it only once that path has been observed in your own deployment |
+| `UC_AUTHORIZATION_URL` | no | provider's OAuth authorization endpoint, e.g. `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/authorize`. **All four** login variables blank = hosted login off (see [Microsoft Entra ID sign-in](#microsoft-entra-id-sign-in-optional)) |
+| `UC_TOKEN_URL` | no | provider's OAuth token endpoint, e.g. `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token` |
+| `UC_CLIENT_ID` | no | client id of the application registered for the UI login; must also be listed in `UC_AUDIENCES` |
+| `UC_CLIENT_SECRET` | no | that application's client secret — stays on the server, never sent to the browser |
+| `UC_EXTERNAL_URL` | no | browser-facing base URL of UC (`https://uc.example.com`) when a proxy in front does not send `X-Forwarded-Proto`/`X-Forwarded-Host`; blank = derived from the request |
+| `UC_ADMIN_PASSWORD` | no | password of the built-in `admin` for the UI's administrator sign-in at `<ui>/login/admin`. Blank = that entry point off. See [UI sign-in](#ui-sign-in) |
 | `ALIYUN_REGION` | **yes** | e.g. `cn-hangzhou` |
 | `ALIYUN_ACCESS_KEY` | **yes** | master RAM user AK (used for STS `AssumeRole`) |
 | `ALIYUN_SECRET_KEY` | **yes** | master RAM user SK |
@@ -267,3 +272,174 @@ Notes:
   [Onboarding a new DWSU](#onboarding-a-new-dwsu-hot-no-restart)):
   `./uc_add_jwks_key.sh <public_key.jwk.json> $UC_EXTERNAL_JWKS_FILE <issuer>`
   (the third argument binds the issuer to that key, so UC only uses it to verify tokens from that issuer).
+
+
+## UI sign-in
+
+The UI requires sign-in. Each way in has an address of its own; the application's address is not one
+of them, and without a session it redirects to `<ui>/login`. Which ways exist is decided by the
+server's configuration at runtime — the UI asks `GET /auth/providers` on load, so one UI build serves
+every deployment:
+
+| Address | Who | Enabled by |
+|---|---|---|
+| **`<ui>/login`** — the default page, offering **Sign in with Microsoft** | employees, with their M365 account | the four `UC_AUTHORIZATION_URL` … `UC_CLIENT_SECRET` settings |
+| **`<ui>/login/admin`** — a password form, deliberately not linked from the login page | whoever runs the server | `UC_ADMIN_PASSWORD` |
+| **`<ui>/login/token`** — paste an access token this server issued | whoever runs the server | always available |
+
+All three end in the same `UC_TOKEN` cookie, so nothing downstream distinguishes them. After sign-in the
+catalog / schema / table lists are filtered to what that user has been granted (`filterCatalogs` and
+friends run server-side); the administrator, as metastore owner, sees everything.
+
+`deploy-uc.sh` warns when authorization is on but neither entry point is configured, since nobody
+could sign in.
+
+**Signing in with an access token.** Whoever runs the server can sign in with the token it writes
+to `etc/conf/token.txt` at `<ui>/login/token`, pasting it into the form or opening
+`<ui>/login/token?token=<token>`; the page drops the token from the address bar once it is used.
+The server verifies the token the way it verifies any request and hands it back as the session
+cookie, so the session ends when the token does.
+
+Earlier versions had the UI server inject that token into every API call instead, which made the
+UI's own address a way into an authorized server with no sign-in at all. The UI server now adds no
+credentials of its own.
+
+### Microsoft Entra ID (M365)
+
+#### 1. Entra side
+
+Register one application for the UI:
+
+| Item | |
+|---|---|
+| Application registration → `tenant id`, `client id`, `client secret`. The first two sit side by side on the app's overview page and are **different** GUIDs: `Directory (tenant) ID` identifies the organization and goes into the two URLs; `Application (client) ID` identifies this app and goes into `UC_CLIENT_ID` | ✅ |
+| **`email` optional claim** — without it accounts cannot be matched to UC users | ✅ |
+| Redirect URI: `<browser-facing UC URL>/api/1.0/unity-control/auth/callback` | ✅ |
+
+Who can do this: a member of the tenant can register an application and create its secret while the
+tenant leaves "users can register applications" and user consent on, which many organizations turn
+off. The scopes UC asks for — `openid`, `profile`, `email` — need no administrator consent by
+themselves, but an application that requires assignment does. Ask the tenant administrator unless
+the customer says otherwise; it is a ten-minute job, and it also settles who owns the application
+and therefore who rotates its secret.
+
+The tenant id and both endpoint URLs are public. Given the customer's email domain you can read them
+without signing in to anything:
+
+```bash
+curl -s https://login.microsoftonline.com/<customer-domain>/v2.0/.well-known/openid-configuration
+```
+
+The `issuer` field states the tenant GUID, and `authorization_endpoint` / `token_endpoint` are the
+two URLs below.
+
+#### 2. UC side (`uc.env`)
+
+```bash
+UC_AUTHORIZATION_URL=https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize
+UC_TOKEN_URL=https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token
+UC_CLIENT_ID=<ui-client-id>
+UC_CLIENT_SECRET=<ui-client-secret>
+UC_ACCESS_TOKEN_TTL=PT12H
+```
+
+`deploy-uc.sh` derives the rest from those four and prints each addition, leaving whatever is
+already configured in place:
+
+| Derived | From | When |
+|---|---|---|
+| `UC_AUDIENCES` += the client id | `UC_CLIENT_ID` | always; an id_token is addressed to the application |
+| `UC_ALLOWED_ISSUERS` += `https://login.microsoftonline.com/<tenant-id>/v2.0` | `UC_AUTHORIZATION_URL` | only when it names a tenant GUID on the v2.0 endpoint |
+
+A v1.0 endpoint issues as `https://sts.windows.net/<tenant-id>/`, a tenant named by domain does not
+state its GUID, and `common` / `organizations` issue per tenant. The script does not guess those: it
+warns and points at the provider's `.well-known/openid-configuration`, whose `issuer` field is the
+value to put in `UC_ALLOWED_ISSUERS`.
+
+The static JWKS for Relyt instances keeps working alongside this: an issuer with a key in the JWKS
+file is verified from the file, any other trusted issuer through OIDC discovery.
+
+Multi-tenant (`common` / `organizations`) endpoints advertise the literal issuer template
+`https://login.microsoftonline.com/{tenantid}/v2.0`; UC accepts the real tenant GUID in that position.
+`UC_ALLOWED_ISSUERS` is still an exact match, so list each tenant's issuer.
+
+The UI proxy forwards `X-Forwarded-Proto`/`X-Forwarded-Host` so UC can build the callback URL the
+browser actually uses; set `UC_EXTERNAL_URL` if another proxy in front strips them.
+
+#### 3. Provisioning users
+
+There is no just-in-time provisioning: every employee who should be able to sign in must exist in UC
+first (`POST /scim2/Users`) with their **real Microsoft email, byte-for-byte equal to the token's
+`email` claim**. UC matches a token by `email`, then `preferred_username` / `upn` (Entra's sign-in
+name), then `sub` — all against the user's email. Grants are then given to that UC user like any
+other. Deleting and recreating a user drops every grant (grants are stored against the user's UUID).
+
+#### 4. The client secret expires
+
+Entra issues client secrets with an end date — 6, 12 or 24 months, whichever the application's owner
+picked — and says nothing when it approaches. Know the blast radius before the day arrives.
+
+**What stops, and what does not.** The secret is used in exactly one request: the server redeeming
+the authorization code for an id_token inside `/auth/callback`. Everything else is untouched:
+
+| Path | On an expired secret |
+|---|---|
+| Programs reading and writing through Relyt | unaffected — the coordinator authenticates with its instance key from the local JWKS file, never through Entra |
+| Spark reading metadata with a UC token | unaffected, same reason |
+| People already signed in to the UI | keep working until their token expires (`UC_ACCESS_TOKEN_TTL`, `PT12H` by default): `UC_TOKEN` is issued and verified by UC itself, statelessly |
+| Signing in again with a Microsoft account | **fails** |
+| `<ui>/login/admin` and `<ui>/login/token` | unaffected — neither touches Entra, so whoever runs the server is never locked out |
+
+**What it looks like, and the trap in diagnosing it.** The failure lands *after* Entra has
+authenticated the person: they sign in at Microsoft successfully and the error appears on the way
+back. The browser shows
+
+```
+Identity provider rejected the authorization code: 401 Unauthorized (invalid_client, AADSTS7000222)
+```
+
+The code in brackets is what separates the three causes that all fail here with the same status: a
+lapsed secret (`AADSTS7000222`), a redirect URI that no longer matches the registration
+(`AADSTS50011`), and an authorization code already used (`AADSTS54005`). The provider's full
+description, with its correlation id, is logged at `WARN` — read the server log before touching the
+configuration.
+
+**Rotating, without interrupting a single sign-in.** An application may hold two valid secrets at
+once, so the order matters more than the timing:
+
+1. In Entra, under *Certificates & secrets*, create the new secret **before the old one lapses**. Both are now valid.
+2. Put it in `UC_CLIENT_SECRET` and re-render (`deploy-uc.sh`).
+3. **Restart the UC server.** This step cannot be skipped: `ServerProperties` reads the file once at startup and never reloads it, so an edited `server.properties` does nothing until the process restarts.
+4. Sign in with a Microsoft account to confirm the new secret works.
+5. Delete the old secret in Entra.
+
+The restart is invisible to people already signed in — their cookie is verified statelessly and
+survives it. Only new sign-ins are refused, for as long as the process takes to come back.
+
+**Operational advice.** Choose the maximum lifetime Entra offers (24 months) and record the end date
+somewhere that gets read, because nothing will remind you. For a real alert, poll the application's
+`passwordCredentials[].endDateTime` through the Graph API and warn a month ahead.
+
+Note the current limit: UC supports a client secret only. There is no configuration for a
+certificate or a federated credential, and the code exchange always sends a `client_secret` form
+field. If your security policy forbids long-lived static secrets, that is a code change worth
+tracking as its own issue rather than a configuration option waiting to be found.
+
+#### 5. Verifying the permission filter
+
+Sign in as two Microsoft accounts with different grants and confirm the catalog / schema / table
+lists differ. The filter is server-side, so no UI configuration is involved.
+
+### Administrator sign-in
+
+Set `UC_ADMIN_PASSWORD` and open `<ui>/login/admin`. The username is the built-in `admin`. The
+password is stored in the rendered `server.properties` alongside the other secrets and compared in
+constant time; a failed attempt is delayed by a second, which slows but does not stop guessing — use
+a long random value and keep the UI behind your usual network controls.
+
+### How programs reach UC
+
+Customer programs do not sign in with Microsoft identities. They go through Relyt, whose coordinator
+authenticates to UC with its instance key registered in the static JWKS file (see [Onboarding a new
+DWSU](#onboarding-a-new-dwsu-hot-no-restart)); Spark reads metadata directly with a UC token. The
+Microsoft integration above is for people using the UI.

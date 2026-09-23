@@ -52,9 +52,10 @@ Feature history of this fork, by PR merge date.
 - features: —
 - bugfix: `deploy-uc.sh` no longer refuses to start when `UC_ALLOWED_ISSUERS` is empty, which is the documented default (trusted issuers come from the external JWKS file).
 
-## ⚠️ Known gap: UI authentication is incomplete
+## 2026-09-23
 
-The UI currently has no per-user login: the standalone UI server injects a single
-server-side bearer token for all API calls, so everyone using the UI acts as that
-one identity. A proper UI login & authentication system (per-user sign-in wired
-into the server's token-exchange flow) still needs to be built.
+#17 (https://github.com/relytcloud/unitycatalog/pull/17)
+
+- features: UI sign-in, per user. Three entry points, each at an address of its own: `/login` with **Sign in with Microsoft** (Entra ID, through an OAuth flow the server hosts end to end, so the client secret never reaches the browser), `/login/admin` for the administrator password, and `/login/token` for an access token the server issued. The application is no longer an entry point and the UI server injects nothing; what a signed-in person sees is filtered by their grants. On the server: the static JWKS file and OIDC discovery now coexist (routed by whether the issuer is registered in the file), the caller resolves through an ordered claim chain (`email`, `preferred_username`, `upn`, `sub`), discovery is cached per issuer and bounded, and Entra's `{tenantid}` issuer template is matched segment-wise. `deploy-uc.sh` derives the audience and issuer from the Microsoft settings and starts the UI with the server.
+- bugfix: The session cookie is now one a browser keeps -- `Secure` only when the browser is on HTTPS, and `SameSite=Lax` rather than `Strict`, which was withheld on the cross-site navigation back from the identity provider. The URL transcoder passes a redirect back instead of following it (it relayed the provider's error page as a 400) and ends a bodyless response on its headers instead of leaving the caller waiting. A refused authorization code now names the provider's error code, which separates an expired client secret from a mismatched redirect URI.
+

@@ -64,10 +64,19 @@ public class JwksOperationsTest {
 
   @Test
   public void keyWithoutIssuerMemberIsRejected() throws Exception {
-    String jwks = "{\"keys\":[" + entry("kidNoIssuer", X_A, Y_A, null) + "]}";
+    // issuer-a IS registered (via kidA), so the file provider is consulted; the unbound key in the
+    // same file must still not be handed out for it. (An issuer with no registered key at all
+    // never reaches the file: it is routed to OIDC discovery, see knownIssuers* below.)
+    String jwks =
+        "{\"keys\":["
+            + entry("kidA", X_A, Y_A, "issuer-a")
+            + ","
+            + entry("kidNoIssuer", X_B, Y_B, null)
+            + "]}";
 
     JwkProvider provider = providerFor("issuer-a", jwks);
 
+    assertThat(provider.get("kidA").getId()).isEqualTo("kidA");
     assertThatThrownBy(() -> provider.get("kidNoIssuer")).isInstanceOf(JwkException.class);
   }
 

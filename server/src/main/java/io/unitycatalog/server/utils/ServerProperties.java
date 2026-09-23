@@ -196,6 +196,12 @@ public class ServerProperties {
     CLIENT_ID("server.client-id"),
     CLIENT_SECRET("server.client-secret"),
     REDIRECT_PORT("server.redirect-port", POSITIVE_INTEGER_VALIDATOR),
+    // Base URL at which browsers reach this server (scheme + host [+ port]), used to build the
+    // OAuth redirect_uri for the server-hosted login flow. Optional: when unset it is derived
+    // from X-Forwarded-Proto / X-Forwarded-Host or the Host header of the incoming request.
+    EXTERNAL_URL("server.external-url", URL_VALIDATOR),
+    // Password for signing the built-in "admin" account into the UI (issue #15). Blank = off.
+    ADMIN_PASSWORD("server.admin-password"),
     COOKIE_TIMEOUT("server.cookie-timeout", "P5D", DURATION_VALIDATOR),
     MANAGED_TABLE_ENABLED("server.managed-table.enabled", "false", BOOLEAN_VALIDATOR),
     // `storage-root.*` are replaced by managed storage locations of catalog and schema.
@@ -521,6 +527,53 @@ public class ServerProperties {
    */
   public List<String> getAudiences() {
     return getCommaSeparatedList("server.audiences");
+  }
+
+  /** OAuth authorization endpoint of the identity provider behind the server-hosted login. */
+  public String getAuthorizationUrl() {
+    return blankToNull(get(Property.AUTHORIZATION_URL));
+  }
+
+  /** OAuth token endpoint the server exchanges the authorization code at. */
+  public String getTokenUrl() {
+    return blankToNull(get(Property.TOKEN_URL));
+  }
+
+  public String getClientId() {
+    return blankToNull(get(Property.CLIENT_ID));
+  }
+
+  public String getClientSecret() {
+    return blankToNull(get(Property.CLIENT_SECRET));
+  }
+
+  /**
+   * Password of the built-in administrator for the UI's password sign-in, or null when that entry
+   * point is switched off. Compared in constant time by the login endpoint.
+   */
+  public String getAdminPassword() {
+    return blankToNull(get(Property.ADMIN_PASSWORD));
+  }
+
+  /** Browser-facing base URL of this server, or null to derive it from the request. */
+  public String getExternalUrl() {
+    String value = blankToNull(get(Property.EXTERNAL_URL));
+    return value == null ? null : value.replaceAll("/+$", "");
+  }
+
+  /**
+   * Whether the server-hosted login flow (/auth/login, /auth/callback) is fully configured: the
+   * deployment template ships the four OAuth properties blank, which turns the flow off.
+   */
+  public boolean isHostedLoginConfigured() {
+    return getAuthorizationUrl() != null
+        && getTokenUrl() != null
+        && getClientId() != null
+        && getClientSecret() != null;
+  }
+
+  private static String blankToNull(String value) {
+    return value == null || value.isBlank() ? null : value;
   }
 
   /**

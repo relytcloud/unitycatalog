@@ -150,6 +150,154 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SelfCapabilities'
+  /auth/login:
+    get:
+      tags:
+        - OAuth2
+      operationId: login
+      summary: Start the server-hosted login flow
+      description: |
+        Redirects the browser to the configured identity provider's authorization endpoint
+        (server.authorization-url) with a one-time state bound to a short-lived cookie. The
+        identity provider sends the browser back to /auth/callback. Only available when the
+        OAuth client properties are configured on the server; the client secret never leaves it.
+      parameters:
+        - in: query
+          name: redirect
+          required: false
+          description: Path within the UI to return to after login. Must be a relative path.
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to the identity provider.
+        '400':
+          description: The hosted login flow is not configured on this server.
+  /auth/callback:
+    get:
+      tags:
+        - OAuth2
+      operationId: loginCallback
+      summary: Complete the server-hosted login flow
+      description: |
+        Receives the authorization code from the identity provider, exchanges it for an identity
+        token using the server-held client secret, verifies that token exactly like the token
+        exchange endpoint does, and issues a Unity Catalog access token as the UC_TOKEN cookie
+        before redirecting back into the UI.
+      parameters:
+        - in: query
+          name: code
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: state
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: error
+          required: false
+          schema:
+            type: string
+        - in: query
+          name: error_description
+          required: false
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Login succeeded; the UC_TOKEN cookie is set and the browser is sent back to the UI.
+        '400':
+          description: Missing or mismatched state, an error reported by the identity provider, or an unknown user.
+  /auth/providers:
+    get:
+      tags:
+        - OAuth2
+      operationId: getAuthProviders
+      summary: Which sign-in methods this server offers
+      description: |
+        Public (no token required). Lets a UI decide at runtime whether sign-in is required at all
+        and which entry points to show, so one UI build follows the server's configuration instead
+        of baking the choice in.
+      responses:
+        '200':
+          description: The available sign-in methods.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthProviders'
+  /auth/admin/login:
+    post:
+      tags:
+        - OAuth2
+      operationId: adminLogin
+      summary: Sign in as the built-in administrator with a password
+      description: |
+        Exchanges the administrator password configured on the server (server.admin-password) for
+        a Unity Catalog access token, returned in the body and set as the UC_TOKEN cookie. Serves
+        the UI's administrator entry point; unavailable unless the password is configured.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Signed in; the UC_TOKEN cookie is set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthTokenExchangeInfo'
+        '400':
+          description: Administrator login is not configured on this server.
+        '401':
+          description: Wrong username or password.
+  /auth/token/login:
+    post:
+      tags:
+        - OAuth2
+      operationId: tokenLogin
+      summary: Open a browser session with an access token already held
+      description: |
+        Accepts a Unity Catalog access token issued by this server (the one in etc/conf/token.txt,
+        for instance) and sets it as the UC_TOKEN cookie, so an operator can reach the UI with the
+        token instead of a password. The token is verified as any request's token is -- signature,
+        expiry and an enabled user -- and is handed back unchanged, so the session cannot outlive
+        it. Tokens from an identity provider go to /auth/tokens instead.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - token
+              properties:
+                token:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Signed in; the UC_TOKEN cookie is set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthTokenExchangeInfo'
+        '400':
+          description: No token supplied.
+        '401':
+          description: The token is not valid for sign-in.
   /auth/tokens:
     post:
       tags:
@@ -321,6 +469,18 @@ components:
               type: string
             lastModified:
               type: string
+    AuthProviders:
+      type: object
+      properties:
+        authorization_enabled:
+          type: boolean
+          description: Whether requests must carry a token at all (server.authorization).
+        hosted_login:
+          type: boolean
+          description: Whether the server-hosted OAuth sign-in (/auth/login) is configured.
+        admin_login:
+          type: boolean
+          description: Whether the administrator password sign-in (/auth/admin/login) is configured.
     SelfCapabilities:
       type: object
       properties:

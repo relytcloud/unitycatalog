@@ -40,6 +40,10 @@ class URLTranscoderVerticle extends AbstractVerticle {
                     String path = transcodeRequest.path().replace("%1F", ".");
                     HttpRequest<Buffer> serviceRequest =
                         client.request(method, servicePort, host, path);
+                    // A redirect is an answer to pass back, not one to chase: the sign-in flow
+                    // sends the browser to an identity provider, and following it here would
+                    // return that provider's page to the browser instead of the redirect.
+                    serviceRequest.followRedirects(false);
                     serviceRequest.putHeaders(transcodeRequest.headers());
                     for (Map.Entry<String, String> entry : transcodeRequest.params()) {
                       serviceRequest.addQueryParam(
@@ -54,7 +58,10 @@ class URLTranscoderVerticle extends AbstractVerticle {
                     for (Map.Entry<String, String> entry : resp.headers()) {
                       transcodeResp.putHeader(entry.getKey(), entry.getValue());
                     }
-                    return transcodeResp.end(resp.bodyAsBuffer());
+                    // A redirect, a 304 or an answer to HEAD carries no body, and ending with a
+                    // null buffer leaves the caller waiting forever. The headers are the answer.
+                    Buffer body = resp.bodyAsBuffer();
+                    return body == null ? transcodeResp.end() : transcodeResp.end(body);
                   });
         });
 

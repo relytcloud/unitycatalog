@@ -102,6 +102,120 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/auth/login': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Start the server-hosted login flow
+     * @description Redirects the browser to the configured identity provider's authorization endpoint
+     *     (server.authorization-url) with a one-time state bound to a short-lived cookie. The
+     *     identity provider sends the browser back to /auth/callback. Only available when the
+     *     OAuth client properties are configured on the server; the client secret never leaves it.
+     */
+    get: operations['login'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/auth/callback': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Complete the server-hosted login flow
+     * @description Receives the authorization code from the identity provider, exchanges it for an identity
+     *     token using the server-held client secret, verifies that token exactly like the token
+     *     exchange endpoint does, and issues a Unity Catalog access token as the UC_TOKEN cookie
+     *     before redirecting back into the UI.
+     */
+    get: operations['loginCallback'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/auth/providers': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Which sign-in methods this server offers
+     * @description Public (no token required). Lets a UI decide at runtime whether sign-in is required at all
+     *     and which entry points to show, so one UI build follows the server's configuration instead
+     *     of baking the choice in.
+     */
+    get: operations['getAuthProviders'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/auth/admin/login': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Sign in as the built-in administrator with a password
+     * @description Exchanges the administrator password configured on the server (server.admin-password) for
+     *     a Unity Catalog access token, returned in the body and set as the UC_TOKEN cookie. Serves
+     *     the UI's administrator entry point; unavailable unless the password is configured.
+     */
+    post: operations['adminLogin'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/auth/token/login': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Open a browser session with an access token already held
+     * @description Accepts a Unity Catalog access token issued by this server (the one in etc/conf/token.txt,
+     *     for instance) and sets it as the UC_TOKEN cookie, so an operator can reach the UI with the
+     *     token instead of a password. The token is verified as any request's token is -- signature,
+     *     expiry and an enabled user -- and is handed back unchanged, so the session cannot outlive
+     *     it. Tokens from an identity provider go to /auth/tokens instead.
+     */
+    post: operations['tokenLogin'];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/auth/tokens': {
     parameters: {
       query?: never;
@@ -202,6 +316,14 @@ export interface components {
         created?: string;
         lastModified?: string;
       };
+    };
+    AuthProviders: {
+      /** @description Whether requests must carry a token at all (server.authorization). */
+      authorization_enabled?: boolean;
+      /** @description Whether the server-hosted OAuth sign-in (/auth/login) is configured. */
+      hosted_login?: boolean;
+      /** @description Whether the administrator password sign-in (/auth/admin/login) is configured. */
+      admin_login?: boolean;
     };
     SelfCapabilities: {
       /**
@@ -519,6 +641,167 @@ export interface operations {
         content: {
           'application/json': components['schemas']['SelfCapabilities'];
         };
+      };
+    };
+  };
+  login: {
+    parameters: {
+      query?: {
+        /** @description Path within the UI to return to after login. Must be a relative path. */
+        redirect?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Redirect to the identity provider. */
+      302: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description The hosted login flow is not configured on this server. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  loginCallback: {
+    parameters: {
+      query?: {
+        code?: string;
+        state?: string;
+        error?: string;
+        error_description?: string;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Login succeeded; the UC_TOKEN cookie is set and the browser is sent back to the UI. */
+      302: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Missing or mismatched state, an error reported by the identity provider, or an unknown user. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  getAuthProviders: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The available sign-in methods. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['AuthProviders'];
+        };
+      };
+    };
+  };
+  adminLogin: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/x-www-form-urlencoded': {
+          username: string;
+          /** Format: password */
+          password: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Signed in; the UC_TOKEN cookie is set. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['OAuthTokenExchangeInfo'];
+        };
+      };
+      /** @description Administrator login is not configured on this server. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Wrong username or password. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  tokenLogin: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        'application/x-www-form-urlencoded': {
+          /** Format: password */
+          token: string;
+        };
+      };
+    };
+    responses: {
+      /** @description Signed in; the UC_TOKEN cookie is set. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['OAuthTokenExchangeInfo'];
+        };
+      };
+      /** @description No token supplied. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description The token is not valid for sign-in. */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
     };
   };

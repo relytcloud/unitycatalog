@@ -1,10 +1,14 @@
 // Standalone Unity Catalog UI server.
 //
 // Serves the CRA production build (`yarn build` -> ./build) and proxies the
-// Unity Catalog REST API, injecting a server-side bearer token so the browser
-// needs no OAuth/IdP login. This is the built-bundle counterpart of the
-// dev-only src/setupProxy.js (same token-injection trick, but for a real
-// process that can run outside `react-scripts start`).
+// Unity Catalog REST API. It adds no credentials of its own: every visitor
+// signs in and carries their own UC_TOKEN cookie, so who you are in the UI is
+// who the server says you are.
+//
+// It used to inject the admin bearer token into every proxied call, which made
+// this address an unauthenticated way into an authorized server -- opening it
+// was enough to be admin. The token now has an entry point of its own,
+// /login/token, which the server verifies before opening a session.
 //
 // Used two ways:
 //   - local "binary package" mode:  `yarn build` then `node server.js`
@@ -14,8 +18,10 @@
 // Env:
 //   PORT           listen port                          (default 3000)
 //   HOST           bind address                         (default 0.0.0.0)
-//   UC_TARGET      Unity Catalog server base URL        (default http://localhost:8088)
-//   UC_TOKEN_FILE  path to the UC admin token file (bearer injected into /api/*) — required
+//   UC_TARGET      Unity Catalog server base URL        (default http://localhost:8089)
+//                  This is the server's own port, which is the port it is started with plus
+//                  one: the started port runs a URL transcoder that the UI does not need and
+//                  that drops bodyless answers such as the sign-in redirect.
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
@@ -23,8 +29,7 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const UC_TARGET = process.env.UC_TARGET || 'http://localhost:8088';
-const TOKEN_FILE = process.env.UC_TOKEN_FILE;
+const UC_TARGET = process.env.UC_TARGET || 'http://localhost:8089';
 const BUILD_DIR = path.join(__dirname, 'build');
 
 function die(msg) {
@@ -32,35 +37,22 @@ function die(msg) {
   process.exit(1);
 }
 
-if (!TOKEN_FILE) {
-  die('UC_TOKEN_FILE is required (path to the UC admin token).');
-}
 if (!fs.existsSync(path.join(BUILD_DIR, 'index.html'))) {
   die(`UI build not found at ${BUILD_DIR}. Run "yarn build" first.`);
 }
-let token;
-try {
-  token = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-} catch (err) {
-  die(`cannot read UC_TOKEN_FILE (${TOKEN_FILE}): ${err.message}`);
-}
-if (!token) {
-  die(`UC_TOKEN_FILE (${TOKEN_FILE}) is empty.`);
-}
-
 const app = express();
 
-// Proxy the UC REST API first (before static/fallback), injecting the bearer
-// token. No body parser runs ahead of this, so POST/PATCH bodies stream through
-// untouched.
+// Proxy the UC REST API first (before static/fallback). Requests go through as
+// the browser sent them, cookie included; no body parser runs ahead of this, so
+// POST/PATCH bodies stream through untouched.
 app.use(
   ['/api/1.0', '/api/2.1'],
   createProxyMiddleware({
     target: UC_TARGET,
     changeOrigin: true,
-    onProxyReq: (proxyReq) => {
-      proxyReq.setHeader('Authorization', 'Bearer ' + token);
-    },
+    // X-Forwarded-Proto/Host let the server build the OAuth callback URL the
+    // browser actually uses (this origin), not the proxied target's.
+    xfwd: true,
   }),
 );
 

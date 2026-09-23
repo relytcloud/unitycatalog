@@ -320,6 +320,12 @@ public class UnityCatalogServer {
           .routeDecorator()
           .pathPrefix(CONTROL_PATH)
           .exclude(CONTROL_PATH + "auth/tokens")
+          // The hosted login flow is what produces a token; it cannot require one.
+          .exclude(CONTROL_PATH + "auth/login")
+          .exclude(CONTROL_PATH + "auth/callback")
+          .exclude(CONTROL_PATH + "auth/admin/login")
+          .exclude(CONTROL_PATH + "auth/token/login")
+          .exclude(CONTROL_PATH + "auth/providers")
           .build(accessDecorator);
 
       AuthDecorator authDecorator = new AuthDecorator(securityContext, repositories);
@@ -328,6 +334,11 @@ public class UnityCatalogServer {
           .routeDecorator()
           .pathPrefix(CONTROL_PATH)
           .exclude(CONTROL_PATH + "auth/tokens")
+          .exclude(CONTROL_PATH + "auth/login")
+          .exclude(CONTROL_PATH + "auth/callback")
+          .exclude(CONTROL_PATH + "auth/admin/login")
+          .exclude(CONTROL_PATH + "auth/token/login")
+          .exclude(CONTROL_PATH + "auth/providers")
           .build(authDecorator);
 
       ExceptionHandlingDecorator exceptionDecorator =
