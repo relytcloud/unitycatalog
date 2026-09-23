@@ -25,18 +25,32 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAPublicKey;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
 import lombok.SneakyThrows;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class JwksOperations {
 
-  private final WebClient webClient = WebClient.builder().build();
+  // Discovery and JWKS fetches go to a third party over the public internet; without a bound a
+  // slow or unreachable identity provider would pin every token exchange for as long as the
+  // socket stays open.
+  private static final Duration IDP_TIMEOUT = Duration.ofSeconds(10);
+
+  private final WebClient webClient =
+      WebClient.builder().responseTimeout(IDP_TIMEOUT).writeTimeout(IDP_TIMEOUT).build();
   private static final ObjectMapper mapper = new ObjectMapper();
+  // One provider per OIDC issuer, resolved through discovery once and then reused; the provider
+  // itself caches keys by kid and re-fetches on an unseen kid, so key rotation still works. A
+  // changed jwks_uri needs a restart, the same as server.allowed-issuers.
+  private final ConcurrentMap<String, JwkProvider> discoveredProviders = new ConcurrentHashMap<>();
   private final SecurityContext securityContext;
   private final ServerProperties serverProperties;
 
@@ -99,70 +113,136 @@ public class JwksOperations {
       Path certsFile = securityContext.getCertsFile();
       return new JwkProviderBuilder(certsFile.toUri().toURL()).cached(false).build();
     } else {
-      // Trusted external issuers (e.g. Relyt instances doing token-exchange) are bare
-      // identifiers, not OIDC providers: their public keys are registered locally in a static
-      // JWKS file instead of being discovered over the network. Because a single file can hold
-      // keys for multiple issuers, each JWK must carry an "issuer" member and a key is only
-      // accepted for the issuer it was registered to (see IssuerScopedJwkProvider) — otherwise
-      // one registered instance could sign tokens accepted as another allowlisted issuer.
-      String externalJwksFile =
-          serverProperties != null ? serverProperties.getExternalJwksFile() : null;
-      if (externalJwksFile != null && !externalJwksFile.isBlank()) {
-        Path jwksPath = Path.of(externalJwksFile);
-        if (Files.exists(jwksPath)) {
-          LOGGER.debug("Using static external JWKS file '{}' for issuer '{}'", jwksPath, issuer);
-          JwkProvider fileProvider =
-              new JwkProviderBuilder(jwksPath.toUri().toURL()).cached(false).build();
-          return new IssuerScopedJwkProvider(fileProvider, issuer);
-        }
-        LOGGER.warn("Configured external JWKS file '{}' does not exist", jwksPath);
+      // Two trust chains share this method (issue #15). Relyt instances are bare identifiers whose
+      // public keys are registered in the static external JWKS file; OIDC providers such as Entra
+      // ID publish theirs through discovery. The file used to win unconditionally whenever it was
+      // configured -- which the deployment template does by default -- so an OIDC token never
+      // reached discovery and failed with "key not registered for issuer". Route on whether the
+      // issuer has a key registered in the file instead: registered -> file, scoped to that
+      // issuer (see IssuerScopedJwkProvider, which keeps one instance's key from vouching for
+      // another allowlisted issuer); otherwise -> discovery.
+      if (knownIssuers().contains(issuer)) {
+        Path jwksPath = Path.of(serverProperties.getExternalJwksFile());
+        LOGGER.debug("Using static external JWKS file '{}' for issuer '{}'", jwksPath, issuer);
+        JwkProvider fileProvider =
+            new JwkProviderBuilder(jwksPath.toUri().toURL()).cached(false).build();
+        return new IssuerScopedJwkProvider(fileProvider, issuer);
       }
 
-      // Get the JWKS from the OIDC well-known location described here
-      // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
-
-      if (!issuer.startsWith("https://") && !issuer.startsWith("http://")) {
-        issuer = "https://" + issuer;
-      }
-
-      String wellKnownConfigUrl = issuer;
-
-      if (!wellKnownConfigUrl.endsWith("/")) {
-        wellKnownConfigUrl += "/";
-      }
-
-      var path = wellKnownConfigUrl + ".well-known/openid-configuration";
-      LOGGER.debug("path: {}", path);
-
-      String response = webClient
-          .get(path)
-          .aggregate()
-          .join()
-          .contentUtf8();
-
-      // TODO: We should cache this. No need to fetch it each time.
-      Map<String, Object> configMap = mapper.readValue(response, new TypeReference<>() {});
-
-      if (configMap == null || configMap.isEmpty()) {
-        throw new OAuthInvalidRequestException(ErrorCode.ABORTED,
-            "Could not get issuer configuration");
-      }
-
-      String configIssuer = (String) configMap.get("issuer");
-      String configJwksUri = (String) configMap.get("jwks_uri");
-
-      if (!configIssuer.equals(issuer)) {
-        throw new OAuthInvalidRequestException(ErrorCode.ABORTED,
-            "Issuer doesn't match configuration");
-      }
-
-      if (configJwksUri == null) {
-        throw new OAuthInvalidRequestException(ErrorCode.ABORTED, "JWKS configuration missing");
-      }
-
-      // TODO: Or maybe just cache the provider for reuse.
-      return new JwkProviderBuilder(URI.create(configJwksUri).toURL()).cached(false).build();
+      return discoveredProviders.computeIfAbsent(issuer, this::discoverJwkProvider);
     }
+  }
+
+  /**
+   * Resolves an OIDC issuer's JWKS through its well-known configuration. Called once per issuer
+   * (see {@link #discoveredProviders}); the returned provider caches keys and rate-limits fetches.
+   */
+  @SneakyThrows
+  private JwkProvider discoverJwkProvider(String issuer) {
+    // Get the JWKS from the OIDC well-known location described here
+    // https://openid.net/specs/openid-connect-discovery-1_0-21.html#ProviderConfig
+
+    if (!issuer.startsWith("https://") && !issuer.startsWith("http://")) {
+      issuer = "https://" + issuer;
+    }
+
+    String wellKnownConfigUrl = issuer;
+
+    if (!wellKnownConfigUrl.endsWith("/")) {
+      wellKnownConfigUrl += "/";
+    }
+
+    var path = wellKnownConfigUrl + ".well-known/openid-configuration";
+    LOGGER.debug("path: {}", path);
+
+    // A provider that is down, unreachable or slow (see IDP_TIMEOUT) is an authentication
+    // failure for this token, not a server fault: surface it as a 401 with a JSON body rather than
+    // letting the client's CompletionException escape as a bodyless 500.
+    String response;
+    try {
+      response = webClient.get(path).aggregate().join().contentUtf8();
+    } catch (RuntimeException e) {
+      Throwable cause = e.getCause() != null ? e.getCause() : e;
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAUTHENTICATED,
+          String.format(
+              "Could not fetch the OIDC configuration of issuer '%s': %s",
+              issuer, cause.getMessage()),
+          e);
+    }
+
+    Map<String, Object> configMap;
+    try {
+      configMap = mapper.readValue(response, new TypeReference<>() {});
+    } catch (IOException e) {
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAUTHENTICATED,
+          String.format("Unreadable OIDC configuration from issuer '%s'", issuer),
+          e);
+    }
+
+    if (configMap == null || configMap.isEmpty()) {
+      throw new OAuthInvalidRequestException(
+          ErrorCode.ABORTED, "Could not get issuer configuration");
+    }
+
+    String configIssuer = (String) configMap.get("issuer");
+    String configJwksUri = (String) configMap.get("jwks_uri");
+
+    if (!issuerMatchesConfiguration(configIssuer, issuer)) {
+      throw new OAuthInvalidRequestException(
+          ErrorCode.ABORTED, "Issuer doesn't match configuration");
+    }
+
+    if (configJwksUri == null) {
+      throw new OAuthInvalidRequestException(ErrorCode.ABORTED, "JWKS configuration missing");
+    }
+
+    // Keys are cached by kid; an unseen kid (rotation) triggers a fetch, bounded by the rate
+    // limiter so a stream of bogus kids cannot hammer the provider.
+    return new JwkProviderBuilder(URI.create(configJwksUri).toURL())
+        .cached(10, 24, TimeUnit.HOURS)
+        .rateLimited(10, 1, TimeUnit.MINUTES)
+        .build();
+  }
+
+  /**
+   * Whether the issuer advertised by a discovery document is the one the token claims.
+   *
+   * <p>Single-tenant providers advertise their exact issuer and a plain comparison suffices. Entra
+   * ID's multi-tenant endpoints ({@code common}, {@code organizations}) instead advertise the
+   * literal template {@code https://login.microsoftonline.com/{tenantid}/v2.0} while tokens carry
+   * the real tenant GUID in that position, so the two never compare equal. A {@code {tenantid}}
+   * path segment therefore matches any single segment; every other segment, and the scheme and
+   * host, must still match exactly. Exact-issuer configurations are unaffected.
+   */
+  static boolean issuerMatchesConfiguration(String configIssuer, String issuer) {
+    if (configIssuer == null || issuer == null) {
+      return false;
+    }
+    if (configIssuer.equals(issuer)) {
+      return true;
+    }
+    if (!configIssuer.contains("{tenantid}")) {
+      return false;
+    }
+    String[] expected = configIssuer.split("/");
+    String[] actual = issuer.split("/");
+    if (expected.length != actual.length) {
+      return false;
+    }
+    for (int i = 0; i < expected.length; i++) {
+      if (expected[i].equals("{tenantid}")) {
+        if (actual[i].isEmpty()) {
+          return false;
+        }
+        continue;
+      }
+      if (!expected[i].equals(actual[i])) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**

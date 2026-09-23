@@ -4,6 +4,8 @@ import GoogleAuthButton from '../components/login/GoogleAuthButton';
 import OktaAuthButton from '../components/login/OktaAuthButton';
 import { useAuth } from '../context/auth-context';
 import KeycloakAuthButton from '../components/login/KeycloakAuthButton';
+import EntraAuthButton from '../components/login/EntraAuthButton';
+import { useAuthProviders } from '../hooks/auth-providers';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 export default function LoginPage() {
@@ -15,6 +17,9 @@ export default function LoginPage() {
   const oktaEnabled = process.env.REACT_APP_OKTA_AUTH_ENABLED === 'true';
   const keycloakEnabled =
     process.env.REACT_APP_KEYCLOAK_AUTH_ENABLED === 'true';
+  // Offered whenever the server hosts the flow; nothing to configure in the UI.
+  const { data: providers } = useAuthProviders();
+  const entraEnabled = providers?.hosted_login === true;
 
   const handleGoogleSignIn = async (idToken: string) => {
     await loginWithToken(idToken).then(() => navigate(from, { replace: true }));
@@ -71,9 +76,26 @@ export default function LoginPage() {
               />
             )}
             {keycloakEnabled && <KeycloakAuthButton />}
-            {!googleEnabled && !oktaEnabled && !keycloakEnabled && (
-              <Typography>Auth providers have not been enabled</Typography>
-            )}
+            {entraEnabled && <EntraAuthButton returnTo={from} />}
+            {!googleEnabled &&
+              !oktaEnabled &&
+              !keycloakEnabled &&
+              !entraEnabled && (
+                <Flex vertical={true} align={'center'} gap={'small'}>
+                  <Typography.Text strong>
+                    No sign-in provider is configured on this server
+                  </Typography.Text>
+                  <Typography.Text
+                    type="secondary"
+                    style={{ textAlign: 'center' }}
+                  >
+                    Sign in with Microsoft appears here once the server has the
+                    authorization URL, token URL, client id and client secret of
+                    an identity provider. Whoever runs the server signs in with
+                    a password or an access token instead.
+                  </Typography.Text>
+                </Flex>
+              )}
           </Flex>
         </div>
       </Flex>

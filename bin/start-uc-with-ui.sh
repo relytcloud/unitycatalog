@@ -23,14 +23,15 @@ cd "$UC_HOME"
 # --- UI disabled: original single-process behaviour (exec = server is PID) ---
 case "${UC_ENABLE_UI:-}" in
   1 | true | TRUE | yes | on) ;;
-  *) exec bin/start-uc-server --port "$UC_PORT" ;;
+  *) exec bin/start-uc-server --port "$UC_PORT" "$@" ;;
 esac
 
 # --- UI enabled: two processes in one container ---
-setsid bin/start-uc-server --port "$UC_PORT" &
+setsid bin/start-uc-server --port "$UC_PORT" "$@" &
 UC_PID=$!
 
-# The server writes its admin token on first start; wait for it (bounded).
+# The server writes its admin token on first start. The UI does not use it -- an operator
+# signs in with it at /login/token -- but its arrival is the signal that the server is up.
 TOKEN_FILE="$UC_HOME/etc/conf/token.txt"
 for _ in $(seq 1 90); do
   [ -s "$TOKEN_FILE" ] && break
@@ -46,7 +47,9 @@ done
   exit 1
 }
 
-UC_TARGET="http://localhost:${UC_PORT}" UC_TOKEN_FILE="$TOKEN_FILE" \
+# The UI talks to the Armeria server directly, on UC_PORT+1: UC_PORT itself is the URL
+# transcoder, which exists so dotted names survive a path and which the UI never needs.
+UC_TARGET="http://localhost:$((UC_PORT + 1))" \
   PORT="$UI_PORT" HOST=0.0.0.0 node ui/server.js &
 UI_PID=$!
 echo "[uc-ui] UI on :${UI_PORT} -> UC :${UC_PORT}"

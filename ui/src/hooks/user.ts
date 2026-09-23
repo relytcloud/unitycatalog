@@ -63,6 +63,90 @@ export function useLoginWithToken() {
   });
 }
 
+export interface LoginWithPasswordMutationParams
+  extends RequestBody<
+    ControlApi,
+    '/auth/admin/login',
+    'post',
+    'application/x-www-form-urlencoded'
+  > {}
+
+/**
+ * The administrator's password sign-in. Like the token exchange it asks for the
+ * session to be set as a cookie, so the browser is signed in the same way a
+ * Microsoft sign-in leaves it.
+ */
+export function useLoginWithPassword() {
+  return useMutation<
+    OAuthTokenExchangeInterface,
+    Error,
+    LoginWithPasswordMutationParams
+  >({
+    mutationFn: async (params: LoginWithPasswordMutationParams) => {
+      const response = await (route as Route<ControlApi>)({
+        client: CLIENT,
+        request: {
+          path: '/auth/admin/login',
+          method: 'post',
+          params: { body: params },
+        },
+        config: {
+          baseURL: UC_AUTH_API_PREFIX,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        },
+        errorMessage: 'Failed to login',
+      }).call();
+      if (isError(response)) {
+        return assertNever(response.data.status);
+      } else {
+        return response.data;
+      }
+    },
+  });
+}
+
+export interface LoginWithAccessTokenMutationParams
+  extends RequestBody<
+    ControlApi,
+    '/auth/token/login',
+    'post',
+    'application/x-www-form-urlencoded'
+  > {}
+
+/**
+ * Opens a session from an access token this server already issued, which is how
+ * an operator holding the token in etc/conf/token.txt reaches the UI. The token
+ * itself becomes the session cookie; the server verifies it first.
+ */
+export function useLoginWithAccessToken() {
+  return useMutation<
+    OAuthTokenExchangeInterface,
+    Error,
+    LoginWithAccessTokenMutationParams
+  >({
+    mutationFn: async (params: LoginWithAccessTokenMutationParams) => {
+      const response = await (route as Route<ControlApi>)({
+        client: CLIENT,
+        request: {
+          path: '/auth/token/login',
+          method: 'post',
+          params: { body: params },
+        },
+        config: {
+          baseURL: UC_AUTH_API_PREFIX,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        },
+        errorMessage: 'Failed to login',
+      }).call();
+      if (isError(response)) {
+        return assertNever(response.data.status);
+      } else {
+        return response.data;
+      }
+    },
+  });
+}
+
 export interface LogoutCurrentUserMutationParams {}
 
 export function useLogoutCurrentUser() {

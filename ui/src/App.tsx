@@ -12,6 +12,7 @@ import {
   createBrowserRouter,
   Navigate,
   Outlet,
+  RouteObject,
   RouterProvider,
   useLocation,
   useNavigate,
@@ -29,6 +30,9 @@ import SchemaDetails from './pages/SchemaDetails';
 import { NotificationProvider } from './utils/NotificationContext';
 import ModelDetails from './pages/ModelDetails';
 import Login from './pages/Login';
+import AdminLogin from './pages/AdminLogin';
+import TokenLogin from './pages/TokenLogin';
+import { useAuthProviders } from './hooks/auth-providers';
 import { AuthProvider, useAuth } from './context/auth-context';
 import { UserOutlined } from '@ant-design/icons';
 import ModelVersionDetails from './pages/ModelVersionDetails';
@@ -42,9 +46,47 @@ import ResizableSplit from './components/layouts/ResizableSplit';
 // As of [19/02/2025], this implementation should be updated once the following PR are merged.
 // SEE:
 // https://github.com/unitycatalog/unitycatalog/pull/809
-const authEnabled = process.env.REACT_APP_GOOGLE_AUTH_ENABLED === 'true';
+// Google sign-in is the one provider still decided at build time (it runs an
+// OAuth client in the browser). Whether sign-in is required at all, whether
+// Microsoft sign-in is offered and whether the administrator password is set
+// are asked of the server at runtime (useAuthProviders), so a single UI build
+// follows the server's configuration.
+const buildTimeAuth = process.env.REACT_APP_GOOGLE_AUTH_ENABLED === 'true';
 
-const router = createBrowserRouter([
+// The sign-in entry points, each an address of its own. /login is the default
+// one people are sent to; the other two are for whoever runs the server and are
+// not linked from it. The application itself is never an entry point: without a
+// session it redirects here.
+export const LOGIN_PATH = '/login';
+export const ADMIN_LOGIN_PATH = '/login/admin';
+export const TOKEN_LOGIN_PATH = '/login/token';
+
+/** The route table, exported so tests can mount it on a memory router. */
+export const appRoutes: RouteObject[] = [
+  {
+    path: LOGIN_PATH,
+    element: (
+      <SignInRoute>
+        <Login />
+      </SignInRoute>
+    ),
+  },
+  {
+    path: ADMIN_LOGIN_PATH,
+    element: (
+      <SignInRoute>
+        <AdminLogin />
+      </SignInRoute>
+    ),
+  },
+  {
+    path: TOKEN_LOGIN_PATH,
+    element: (
+      <SignInRoute>
+        <TokenLogin />
+      </SignInRoute>
+    ),
+  },
   {
     element: <AppProvider />,
     children: [
@@ -106,12 +148,48 @@ const router = createBrowserRouter([
       },
     ],
   },
-]);
+];
+
+const router = createBrowserRouter(appRoutes);
+
+/**
+ * Whether a session is needed, whether there is one, and whether either is
+ * still being established. Both the application and the sign-in pages decide
+ * from this, so they cannot disagree about who is signed in.
+ */
+function useSignInState() {
+  const { currentUser, currentUserPending } = useAuth();
+  const { data: providers, isPending: providersPending } = useAuthProviders();
+  const loginRequired =
+    buildTimeAuth || providers?.authorization_enabled === true;
+  // Until the server has said whether sign-in is required, and then until the
+  // session has been checked, show neither the login page nor the app:
+  // flashing either one misleads.
+  const pending =
+    (!buildTimeAuth && providersPending) ||
+    (loginRequired && currentUserPending);
+  return { loginRequired, pending, currentUser };
+}
+
+/** A sign-in page: pointless once signed in, and when nothing requires a session. */
+function SignInRoute({ children }: { children: React.ReactNode }) {
+  const { loginRequired, pending, currentUser } = useSignInState();
+
+  if (pending) {
+    return <p>Loading...</p>;
+  }
+  if (currentUser || !loginRequired) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
 
 function AppProvider() {
   const { logout, currentUser } = useAuth();
   const navigate = useNavigate();
-  const { pathname } = useLocation();
+  const location = useLocation();
+  const { pathname } = location;
+  const { loginRequired, pending } = useSignInState();
 
   const selectedNavKey = pathname.startsWith('/external-data')
     ? 'external-data'
@@ -148,9 +226,21 @@ function AppProvider() {
     [currentUser, logout, navigate],
   );
 
-  return authEnabled && !currentUser ? (
-    <Login />
-  ) : (
+  if (pending) {
+    return <p>Loading...</p>;
+  }
+  // No session: the address people land on is the login page, not this one.
+  if (loginRequired && !currentUser) {
+    return (
+      <Navigate
+        to={LOGIN_PATH}
+        state={{ from: pathname + location.search }}
+        replace
+      />
+    );
+  }
+
+  return (
     <ConfigProvider
       theme={{
         components: {
@@ -205,7 +295,7 @@ function AppProvider() {
               style={{ flex: 1, minWidth: 0 }}
             />
           </div>
-          {authEnabled && (
+          {loginRequired && (
             <div>
               <Dropdown
                 menu={{ items: profileMenuItems }}
@@ -273,18 +363,14 @@ function App() {
     },
   });
 
-  return authEnabled ? (
+  // AuthProvider is always mounted: whether a session is required is decided
+  // per request by AppProvider from what the server reports, not at build time.
+  return (
     <NotificationProvider>
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <RouterProvider router={router} fallbackElement={<p>Loading...</p>} />
         </AuthProvider>
-      </QueryClientProvider>
-    </NotificationProvider>
-  ) : (
-    <NotificationProvider>
-      <QueryClientProvider client={queryClient}>
-        <RouterProvider router={router} fallbackElement={<p>Loading...</p>} />
       </QueryClientProvider>
     </NotificationProvider>
   );

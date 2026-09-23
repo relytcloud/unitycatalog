@@ -79,7 +79,16 @@ public class SecurityContext {
             .getClaims()
             .getOrDefault(JwtClaim.EMAIL.key(), decodedJWT.getClaim(JwtClaim.SUBJECT.key()))
             .asString();
+    return createAccessToken(subject, ttl);
+  }
 
+  /**
+   * Issues an access token whose {@code sub} is the given principal. The token exchange resolves
+   * the incoming identity to a local user first and passes that user's email here, so {@code sub}
+   * is always the key the request path looks users up by (AuthDecorator, UserRepository) regardless
+   * of which claim the identity provider identified the caller with.
+   */
+  public String createAccessToken(String subject, java.time.Duration ttl) {
     Date now = new Date();
     var builder =
         JWT.create()

@@ -9,7 +9,11 @@ import { NotificationProvider } from '../utils/NotificationContext';
  * retries, an in-memory router and the notification provider) so component
  * tests exercise the same wiring as the app.
  */
-export function renderWithProviders(ui: ReactElement) {
+export function renderWithProviders(
+  ui: ReactElement,
+  /** Address to start at, for components that read the path or query string. */
+  options: { route?: string } = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -19,7 +23,9 @@ export function renderWithProviders(ui: ReactElement) {
   return render(
     <NotificationProvider>
       <QueryClientProvider client={queryClient}>
-        <MemoryRouter>{ui}</MemoryRouter>
+        <MemoryRouter initialEntries={[options.route ?? '/']}>
+          {ui}
+        </MemoryRouter>
       </QueryClientProvider>
     </NotificationProvider>,
   );

@@ -4,11 +4,19 @@ server.env=dev
 
 ## Authorization (enable for per-user token-exchange; disable to turn auth off)
 server.authorization=${UC_AUTHORIZATION}
-server.authorization-url=
-server.token-url=
-server.client-id=
-server.client-secret=
+# Server-hosted browser login (issue #15). Leave all four blank to turn the flow off; set all four
+# to enable "Sign in with Microsoft" in the UI. The client secret never leaves the server.
+server.authorization-url=${UC_AUTHORIZATION_URL}
+server.token-url=${UC_TOKEN_URL}
+server.client-id=${UC_CLIENT_ID}
+server.client-secret=${UC_CLIENT_SECRET}
 server.redirect-port=
+# Browser-facing base URL of this server, used to build the OAuth redirect_uri. Optional: when
+# blank it is derived from X-Forwarded-Proto/Host (set by the UI proxy) or the request's Host.
+server.external-url=${UC_EXTERNAL_URL}
+# Password for the built-in "admin" account's UI sign-in (issue #15). Blank = administrator sign-in
+# off. The UI's entry point is <ui>/login/admin; it is deliberately not linked from the login page.
+server.admin-password=${UC_ADMIN_PASSWORD}
 
 # OPTIONAL extra trusted issuers (comma-separated). Trusted issuers are derived primarily from the
 # JWKS file below (each key's "issuer" member, hot-reloaded); this list is a UNION on top, only for

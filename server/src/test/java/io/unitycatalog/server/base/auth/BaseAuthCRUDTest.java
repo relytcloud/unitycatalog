@@ -2,6 +2,7 @@ package io.unitycatalog.server.base.auth;
 
 import static io.unitycatalog.server.security.SecurityContext.Issuers.INTERNAL;
 
+import com.auth0.jwt.JWT;
 import com.auth0.jwt.algorithms.Algorithm;
 import com.sun.net.httpserver.HttpServer;
 import io.unitycatalog.server.base.BaseServerTest;
@@ -16,8 +17,10 @@ import java.security.KeyPairGenerator;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Base64;
+import java.util.Date;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 
@@ -30,6 +33,28 @@ public abstract class BaseAuthCRUDTest extends BaseServerTest {
 
   // Test identity provider keypair and mock OIDC server
   private HttpServer mockOidcServer;
+  /** How many times the mock IdP served its discovery document / JWKS (for caching assertions). */
+  protected final AtomicInteger discoveryRequests = new AtomicInteger();
+
+  protected final AtomicInteger jwksRequests = new AtomicInteger();
+
+  /**
+   * The mock IdP also plays the OAuth token endpoint ({@code /token}) for the server-hosted login
+   * flow: it records the form it received and answers with an id_token signed by the test key for
+   * {@link #tokenEndpointSubject}, addressed to {@link #tokenEndpointAudience}.
+   */
+  protected volatile String tokenEndpointSubject = "admin";
+
+  protected volatile String tokenEndpointAudience = TEST_AUDIENCE;
+  protected volatile String lastTokenRequestBody;
+
+  /**
+   * Set to an OAuth error body (with {@link #tokenEndpointStatus}) to make the token endpoint
+   * refuse the code, the way a provider does when the client secret has lapsed.
+   */
+  protected volatile String tokenEndpointErrorBody;
+
+  protected volatile int tokenEndpointStatus = 200;
   protected String testIssuer;
   protected Algorithm testIssuerAlgorithm;
   protected String testIssuerKeyId;
@@ -87,6 +112,7 @@ public abstract class BaseAuthCRUDTest extends BaseServerTest {
     mockOidcServer.createContext(
         "/.well-known/openid-configuration",
         exchange -> {
+          discoveryRequests.incrementAndGet();
           String discoveryDoc =
               String.format("{\"issuer\":\"%s\",\"jwks_uri\":\"%s/jwks\"}", testIssuer, testIssuer);
           byte[] body = discoveryDoc.getBytes(StandardCharsets.UTF_8);
@@ -99,7 +125,39 @@ public abstract class BaseAuthCRUDTest extends BaseServerTest {
     mockOidcServer.createContext(
         "/jwks",
         exchange -> {
+          jwksRequests.incrementAndGet();
           byte[] body = jwksJson.getBytes(StandardCharsets.UTF_8);
+          exchange.getResponseHeaders().set("Content-Type", "application/json");
+          exchange.sendResponseHeaders(200, body.length);
+          exchange.getResponseBody().write(body);
+          exchange.close();
+        });
+
+    mockOidcServer.createContext(
+        "/token",
+        exchange -> {
+          lastTokenRequestBody =
+              new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+          if (tokenEndpointErrorBody != null) {
+            byte[] error = tokenEndpointErrorBody.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(tokenEndpointStatus, error.length);
+            exchange.getResponseBody().write(error);
+            exchange.close();
+            return;
+          }
+          String idToken =
+              JWT.create()
+                  .withSubject(tokenEndpointSubject)
+                  .withIssuer(testIssuer)
+                  .withAudience(tokenEndpointAudience)
+                  .withIssuedAt(new Date())
+                  .withKeyId(testIssuerKeyId)
+                  .withJWTId(UUID.randomUUID().toString())
+                  .sign(testIssuerAlgorithm);
+          byte[] body =
+              String.format("{\"id_token\":\"%s\",\"token_type\":\"Bearer\"}", idToken)
+                  .getBytes(StandardCharsets.UTF_8);
           exchange.getResponseHeaders().set("Content-Type", "application/json");
           exchange.sendResponseHeaders(200, body.length);
           exchange.getResponseBody().write(body);
