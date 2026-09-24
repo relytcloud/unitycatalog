@@ -248,9 +248,15 @@ UI 必须登录。**每个入口都有自己的地址，应用地址不是入口
 
 `deploy-uc.sh` 会在"授权开着但一个登录入口都没配"时告警，因为那样没人能登录。
 
-**用访问令牌登录**：运维方可以拿服务端写在 `etc/conf/token.txt` 里的令牌，在 `<ui>/login/token` 粘贴，
-或直接打开 `<ui>/login/token?token=<令牌>`，页面用完会立即把令牌从地址栏抹掉。服务端按校验普通请求的
-同一套规则校验它，然后**原样**作为会话 cookie 返回，所以会话不会比令牌活得久。
+**用访问令牌登录**：在 `<ui>/login/token` 粘贴一个**用户**的访问令牌，或直接打开
+`<ui>/login/token?token=<令牌>`，页面用完会立即把令牌从地址栏抹掉。服务端按校验普通请求的同一套规则
+校验它，然后**原样**作为会话 cookie 返回，所以会话不会比令牌活得久。
+
+> ⚠️ `etc/conf/token.txt` 里那个令牌**不能用于登录**。它的 `sub` 是 `server`（服务令牌，供服务端自用），
+> 而 UC 里从来不存在 email 为 `server` 的用户——`/auth/token/login` 会以
+> `no enabled user named 'server'` 拒绝。这个入口登录成的是**令牌 `sub` 所指的那个用户**，权限也就是
+> 那个用户的权限；要拿一个可登录的令牌，走 `/auth/tokens` 交换，或用 `<ui>/login/admin` 登录后从
+> `UC_TOKEN` cookie 里取。
 
 早期版本是由 UI server 把这个令牌注入到每个接口请求里，等于让 UI 的地址本身成为一条无需登录的入口。
 现在 UI server 不再携带任何凭据。
@@ -369,6 +375,59 @@ issue 跟踪，不要在配置项里找。
 配 `UC_ADMIN_PASSWORD`，打开 `<ui>/login/admin`，用户名是内置的 `admin`。密码与其它密钥一同存在渲染后的
 `server.properties` 里，比对是常量时间的，失败会延迟一秒 —— 这能减缓但挡不住暴力猜测，请用足够长的随机
 值，并把 UI 放在既有的网络管控之后。
+
+#### `admin` 是应急通道，不是日常运维账号
+
+管理员权限在 UC 里不是一种账号类型，而是**一个事实**：某个用户在授权表里持有 metastore 的 `OWNER`。
+`GET /auth/capabilities` 返回的 `metastore_admin` 就是在报告这件事。原则上它可以授予和收回，也可以同时
+有多个持有者。
+
+在 UI 的 Users 页面，管理员对任意**在用**账号可以「Make administrator」/「Withdraw administrator」，
+列表里管理员带 `Admin` 标签。对应接口：
+
+```bash
+# 提为管理员
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  "$UC_URL/api/1.0/unity-control/metastore/admins/ops@corp.com"
+
+# 收回
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "$UC_URL/api/1.0/unity-control/metastore/admins/ops@corp.com"
+
+# 看当前有哪些管理员（其它接口都看不到：OWNER 会被 /permissions 过滤掉）
+curl -H "Authorization: Bearer $TOKEN" \
+  "$UC_URL/api/1.0/unity-control/metastore/admins"
+```
+
+**任何管理员都能提拔和收回，不限于内置 `admin`。** metastore OWNER 已经是权限格的顶点——管理员提拔别人
+并没有把谁提到自己之上；反过来，只让 `admin` 有这个权力，等于把应急口令账号拉进日常运维，正是下面要
+避免的习惯。
+
+服务端守着两条线：不能把停用账号提为管理员（它签不进来，只会让"谁在管"变得模糊），以及**收回后必须
+至少还剩一个在用的管理员**。后一条不是形式主义：`UnityAccessUtil.initializeAdmin` 只在 `admin` 用户
+**完全不存在**时才补授 OWNER，所以一个还在、但丢了 OWNER 的 `admin` 行，重启也修不回来。
+
+> 历史说明：`OWNER` 不在公开的 `Privilege` 枚举里，所以它不能走 `/permissions` 通道，上面这组接口是
+> 专门为此开的。之所以不把 `OWNER` 塞进那个枚举：该枚举被所有 securable 共用，放进去等于同时给
+> catalog/schema/table 开了转移属主的口子，那是另一个需要单独设计的特性。
+
+**日常运维请用被授予 metastore OWNER 的真人 M365 账号，不要共用 `admin` 口令。** 三个原因：
+
+1. **它绕过 Entra 的全部控制。** `<ui>/login/admin` 不经过 Entra，因此 MFA、条件访问、以及"员工离职即禁用"
+   都对它无效。共用口令的后果是：某人离职后在 Entra 里被禁用，他照样能用记在本地的口令登进 UC。
+2. **它让操作无法归因。** 服务端日志和后续的审计记录里，操作者永远是 `admin`，分不出是谁做的。对于
+   删用户、改所有权、发放云凭证这类动作，这等于没有审计。
+3. **它是唯一的救命通道，用得越多越容易废掉。** `admin` 这个账号本身可以被停用或降权（见
+   `UnityAccessUtil.initializeAdmin` 的注释），而口令登录**不检查该账号是否还存在、是否还是 ENABLED**
+   —— 账号被停用或删除后，`<ui>/login/admin` 仍然返回登录成功并种下 cookie，但随后每个接口调用都会被
+   403 拒绝，表现为"登录成功却什么都做不了"的死局。把它留着只做应急，就不会走到这一步。
+
+**生产建议**：把 `UC_ADMIN_PASSWORD` 留空。留空时 `GET /auth/providers` 不会报告 `admin_login`，
+`<ui>/login/admin` 这个入口在登录页和服务端都不存在。真需要应急时（Entra 故障、所有管理员都进不来）
+再填上并重启，用完清空。
+
+> `<ui>/login/token` 是同性质的应急入口，同样不要作为日常方式；它使用的 `etc/conf/token.txt` 令牌永不过期，
+> 见[安全要点](#安全要点)。
 
 ### 程序怎么访问 UC
 

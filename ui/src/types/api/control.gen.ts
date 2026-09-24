@@ -50,10 +50,64 @@ export interface paths {
     put: operations['updateUser'];
     post?: never;
     /**
-     * Delete a user
-     * @description Deletes the user that matches the supplied id.
+     * Deactivate or permanently delete a user
+     * @description Without `purge`, deactivates the user — the same state change as a SCIM patch setting
+     *     `active` to false, and equally reversible.
+     *
+     *     With `purge=true`, removes the user record permanently. This is the only way to free the
+     *     user's email and externalId for reuse; it does not block access any harder than
+     *     deactivation, which already refuses the user on every request. Because it cannot be undone,
+     *     the server requires that:
+     *
+     *       * the caller is a metastore administrator, and is not the user being deleted;
+     *       * the user is already deactivated;
+     *       * `confirm_principal` repeats the user's principal exactly;
+     *       * another enabled metastore administrator remains afterwards;
+     *       * the built-in `admin` account is never the target — it is the account behind the
+     *         password sign-in, the way back in when the identity provider is unavailable;
+     *       * `reassign_to` names an enabled user, if the target owns anything.
+     *
+     *     Ownership transfers in both places it is recorded: the `owner` field of each object, and
+     *     the OWNER privileges that actually authorize. `created_by` and `updated_by` are left alone —
+     *     they record what happened, which stays true.
      */
     delete: operations['deleteUser'];
+    options?: never;
+    head?: never;
+    /**
+     * Patch a user
+     * @description Applies a SCIM patch to the user that matches the supplied id. Only a `replace` operation
+     *     with no path is supported, whose value sets the user's `active` flag — this is how a user
+     *     is deactivated and reactivated.
+     *
+     *     Deactivation takes effect on the next request: the server re-reads the user's state on
+     *     every call, so access tokens already issued stop working immediately. Nothing else about
+     *     the user changes — their grants, the objects they own and their email are left as they
+     *     were, which is what makes it reversible.
+     */
+    patch: operations['patchUser'];
+    trace?: never;
+  };
+  '/scim2/Users/{id}/ownedObjects': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description The id of the user. */
+        id: string;
+      };
+      cookie?: never;
+    };
+    /**
+     * List what a user owns
+     * @description Every securable whose owner is this user, so that a caller can see the consequences of
+     *     deleting them before anything happens. One indexed query per securable type, unlike the
+     *     per-object walk needed to enumerate a user's privileges.
+     */
+    get: operations['getUserOwnedObjects'];
+    put?: never;
+    post?: never;
+    delete?: never;
     options?: never;
     head?: never;
     patch?: never;
@@ -74,6 +128,67 @@ export interface paths {
     put?: never;
     post?: never;
     delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/metastore/admins': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * List the metastore's administrators
+     * @description The users holding OWNER on the metastore, deactivated ones included. This is the only way
+     *     to see that: OWNER is filtered out of `/permissions` responses, so no other endpoint
+     *     reveals who holds it.
+     */
+    get: operations['listMetastoreAdmins'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/metastore/admins/{email}': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description The user's principal. */
+        email: string;
+      };
+      cookie?: never;
+    };
+    get?: never;
+    /**
+     * Make a user an administrator
+     * @description Grants the user OWNER on the metastore, which is what being an administrator means: it
+     *     authorizes every securable, including ones they do not personally own.
+     *
+     *     Any administrator may do this. Metastore OWNER is the top of the privilege lattice, so an
+     *     administrator granting one has escalated nobody past themselves — whereas restricting it
+     *     to the built-in `admin` account would make the break-glass password sign-in a participant
+     *     in routine administration.
+     *
+     *     The user must exist and be active; ownership of a deactivated account authorizes nothing
+     *     and would only obscure who is really in charge.
+     */
+    put: operations['grantMetastoreAdmin'];
+    post?: never;
+    /**
+     * Withdraw a user's administrator privilege
+     * @description Revoking your own is allowed — handing over is a real thing to want — but only while
+     *     somebody else still holds it. At least one *enabled* administrator must remain: a
+     *     deactivated one cannot sign in, and a metastore left without one has no supported way back,
+     *     because the bootstrap re-grants OWNER only when the `admin` user does not exist at all.
+     */
+    delete: operations['revokeMetastoreAdmin'];
     options?: never;
     head?: never;
     patch?: never;
@@ -332,6 +447,69 @@ export interface components {
        */
       metastore_admin?: boolean;
     };
+    MetastoreAdmins: {
+      /** @description Principals holding OWNER on the metastore. */
+      admins?: string[];
+    };
+    /**
+     * @description A SCIM patch. Only a single `replace` operation with no path is honoured, and its value
+     *     sets the user's `active` flag.
+     */
+    PatchRequest: {
+      /**
+       * @example [
+       *       "urn:ietf:params:scim:api:messages:2.0:PatchOp"
+       *     ]
+       */
+      schemas?: string[];
+      Operations?: components['schemas']['PatchOperation'][];
+    };
+    PatchOperation: {
+      /**
+       * @description The patch operation; only `replace` is supported.
+       * @example replace
+       */
+      op?: string;
+      /**
+       * @description The attribute to replace. Omit it to send the attributes as an object in `value` (the form Okta and this project's UI use); set it to `active` to send the bare value. `active` is the only attribute this endpoint changes; anything else is answered with 501.
+       * @example active
+       */
+      path?: string;
+      /**
+       * @description With no `path`, the object of attributes to replace — RFC 7644 §3.5.2.1 requires an object here, not a bare value, and the server's SCIM library enforces that while parsing, so a scalar is refused before any handler runs. With `path` set, this is instead that attribute's new value (for `active`, a boolean).
+       * @example {
+       *       "active": false
+       *     }
+       */
+      value?: {
+        /** @description The user's new `active` state. */
+        active?: boolean;
+      };
+    };
+    OwnedObjectsResponse: {
+      /** @description The user whose objects these are. */
+      principal?: string;
+      /**
+       * @description Every securable this user owns. Empty means the user can be deleted without naming
+       *     anyone to take ownership.
+       */
+      owned?: components['schemas']['OwnedObject'][];
+    };
+    OwnedObject: {
+      /**
+       * @description The kind of securable, named as in /permissions/{securable_type}/{full_name}.
+       * @example table
+       */
+      securable_type?: string;
+      /**
+       * @description The securable's qualified name. Falls back to the bare name when an ancestor has
+       *     already been deleted — a catalog's removal does not clear what was under it.
+       * @example sales.raw.orders
+       */
+      full_name?: string;
+      /** @description The securable's id. */
+      securable_id?: string;
+    };
     /** @description SCIM provides a resource type for "User" resources. */
     UserResource: {
       /** @description The id of the user. */
@@ -583,6 +761,97 @@ export interface operations {
   };
   deleteUser: {
     parameters: {
+      query?: {
+        /** @description Permanently remove the user record instead of deactivating them. Cannot be undone. */
+        purge?: boolean;
+        /**
+         * @description Principal (email) taking ownership of everything the user owns. Required with
+         *     `purge=true` when the user owns anything; must name an enabled user other than the
+         *     target. Prefer the administrator performing the deletion over the built-in `admin`
+         *     account, which may itself be deactivated.
+         */
+        reassign_to?: string;
+        /**
+         * @description The target user's principal, repeated back. Required with `purge=true`. The user list
+         *     mixes people with Relyt instance principals, which look alike; this is what catches
+         *     the wrong row being selected.
+         */
+        confirm_principal?: string;
+      };
+      header?: never;
+      path: {
+        /** @description The id of the user. */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The user was successfully deactivated or deleted. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/scim+json': unknown;
+        };
+      };
+      /**
+       * @description A guard refused the purge — missing or mismatched `confirm_principal`, the user is
+       *     still active, the target is the caller or the built-in administrator, no other enabled
+       *     administrator would remain, or `reassign_to` is unusable.
+       */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description The user owns objects and no `reassign_to` was supplied. */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  patchUser: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description The id of the user. */
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: {
+      content: {
+        'application/json': components['schemas']['PatchRequest'];
+      };
+    };
+    responses: {
+      /** @description The user was successfully patched. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/scim+json': unknown;
+        };
+      };
+      /** @description The patch contained no supported operation. */
+      501: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  getUserOwnedObjects: {
+    parameters: {
       query?: never;
       header?: never;
       path: {
@@ -593,13 +862,13 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description The user was successfully deleted. */
+      /** @description The owned objects were successfully retrieved. */
       200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
-          'application/scim+json': unknown;
+          'application/json': components['schemas']['OwnedObjectsResponse'];
         };
       };
     };
@@ -621,6 +890,96 @@ export interface operations {
         content: {
           'application/json': components['schemas']['UserResource'];
         };
+      };
+    };
+  };
+  listMetastoreAdmins: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The administrators were successfully retrieved. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['MetastoreAdmins'];
+        };
+      };
+    };
+  };
+  grantMetastoreAdmin: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description The user's principal. */
+        email: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The user is now an administrator. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description The user is deactivated. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description No such user. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+    };
+  };
+  revokeMetastoreAdmin: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description The user's principal. */
+        email: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The user is no longer an administrator. */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description This would leave the metastore without an enabled administrator. */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description No such user. */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
       };
     };
   };

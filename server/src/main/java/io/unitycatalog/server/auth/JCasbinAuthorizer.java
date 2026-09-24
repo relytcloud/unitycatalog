@@ -139,4 +139,14 @@ public class JCasbinAuthorizer implements UnityCatalogAuthorizer {
                 Collectors.mapping(
                     l -> Privileges.fromValue(l.get(PRIVILEGE_INDEX)), Collectors.toList())));
   }
+
+  @Override
+  public Map<UUID, List<Privileges>> listAuthorizationsForPrincipal(UUID principal) {
+    return enforcer.getFilteredPolicy(PRINCIPAL_INDEX, principal.toString()).stream()
+        .collect(
+            Collectors.groupingBy(
+                l -> UUID.fromString(l.get(RESOURCE_INDEX)),
+                Collectors.mapping(
+                    l -> Privileges.fromValue(l.get(PRIVILEGE_INDEX)), Collectors.toList())));
+  }
 }

@@ -163,7 +163,10 @@ public abstract class SdkAccessControlBaseCRUDTest extends BaseAccessControlCRUD
     for (String userId : createdUserIds) {
       try {
         LOGGER.debug("Deleting test user: {}", userId);
-        usersApi.deleteUser(userId);
+        // Deactivation, as before purge existed: the extra arguments are purge / reassign_to /
+        // confirm_principal, and a purge would additionally require the user to be deactivated
+        // first, which this cleanup has no reason to do.
+        usersApi.deleteUser(userId, null, null, null);
       } catch (Exception e) {
         LOGGER.warn("Failed to delete test user {}: {}", userId, e.getMessage());
       }

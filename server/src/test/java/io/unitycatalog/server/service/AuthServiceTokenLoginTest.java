@@ -122,6 +122,66 @@ public class AuthServiceTokenLoginTest extends BaseAuthCRUDTest {
     assertThat(response.status()).isEqualTo(HttpStatus.BAD_REQUEST);
   }
 
+  /**
+   * The session belongs to whoever the token names, not to whoever pasted it.
+   *
+   * <p>Worth stating outright because this address is reached by pasting a credential: if the
+   * identity ever collapsed to the administrator, anyone holding any valid token would arrive as
+   * one. The reason the operator's own sign-in shows "admin" is simply that etc/conf/token.txt
+   * names admin — not that this endpoint confers it.
+   */
+  @Test
+  public void theSessionIsWhoeverTheTokenNames() throws IOException {
+    createUser("someone@example.com");
+    String theirToken = securityContext.createAccessToken("someone@example.com", null);
+
+    AggregatedHttpResponse response = signIn(theirToken);
+
+    assertThat(response.status()).isEqualTo(HttpStatus.OK);
+    AggregatedHttpResponse me =
+        client
+            .execute(
+                RequestHeaders.builder(HttpMethod.GET, "/api/1.0/unity-control/scim2/Me")
+                    .add(HttpHeaderNames.COOKIE, AuthDecorator.UC_TOKEN_KEY + "=" + theirToken)
+                    .build())
+            .aggregate()
+            .join();
+    assertThat(me.status()).isEqualTo(HttpStatus.OK);
+    assertThat(MAPPER.readTree(me.contentUtf8()).get("userName").asText())
+        .isEqualTo("someone@example.com");
+  }
+
+  /** A token naming somebody the metastore does not know opens nothing. */
+  @Test
+  public void tokenNamingNobodyIsRejected() {
+    String orphan = securityContext.createAccessToken("ghost@example.com", null);
+
+    AggregatedHttpResponse response = signIn(orphan);
+
+    assertThat(response.status()).isEqualTo(HttpStatus.UNAUTHORIZED);
+  }
+
+  private void createUser(String email) throws IOException {
+    AggregatedHttpResponse response =
+        client
+            .execute(
+                RequestHeaders.builder()
+                    .method(HttpMethod.POST)
+                    .path("/api/1.0/unity-control/scim2/Users")
+                    .contentType(MediaType.JSON)
+                    .add(HttpHeaderNames.AUTHORIZATION, "Bearer " + anAdminToken())
+                    .build(),
+                HttpData.ofUtf8(
+                    "{\"displayName\":\""
+                        + email
+                        + "\",\"emails\":[{\"primary\":true,\"value\":\""
+                        + email
+                        + "\"}]}"))
+            .aggregate()
+            .join();
+    assertThat(response.status()).isEqualTo(HttpStatus.CREATED);
+  }
+
   /** The administrator password sign-in is only a convenient source of a real token here. */
   private String anAdminToken() throws IOException {
     String form = "username=admin&password=" + URLEncoder.encode(PASSWORD, StandardCharsets.UTF_8);

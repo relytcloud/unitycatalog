@@ -6,13 +6,18 @@ import {
   Divider,
   Drawer,
   Flex,
+  Segmented,
   Tag,
   Tooltip,
   Typography,
 } from 'antd';
 import { TeamOutlined, UserOutlined } from '@ant-design/icons';
 import ListLayout from '../components/layouts/ListLayout';
-import { ScimUserInterface, useListScimUsers } from '../hooks/users';
+import {
+  ScimUserInterface,
+  useListScimUsers,
+  useMetastoreAdmins,
+} from '../hooks/users';
 import { CreateUserModal } from '../components/modals/CreateUserModal';
 import UserPermissions from '../components/users/UserPermissions';
 import UserAccessDetails from '../components/users/UserAccessDetails';
@@ -25,18 +30,30 @@ interface UserRow extends ScimUserInterface {
   name: string;
 }
 
+type StatusFilter = 'active' | 'inactive';
+
 function primaryEmailOf(user: ScimUserInterface): string {
   const emails = user.emails ?? [];
   return (emails.find((email) => email.primary) ?? emails[0])?.value ?? '';
 }
 
+// A user the server has not told us about is shown in the default view rather
+// than in neither: the two tabs must always add up to the whole directory.
+function isInactive(user: ScimUserInterface): boolean {
+  return user.active === false;
+}
+
 export default function UsersList() {
   const { data, isLoading, error } = useListScimUsers();
+  // Empty for a non-administrator, who is not allowed to read it — the column
+  // then simply shows nothing rather than claiming there are no administrators.
+  const { data: admins } = useMetastoreAdmins();
   const [selectedUser, setSelectedUser] = useState<UserRow | null>(null);
   const [accessDetailsUser, setAccessDetailsUser] = useState<UserRow | null>(
     null,
   );
   const [createOpen, setCreateOpen] = useState(false);
+  const [status, setStatus] = useState<StatusFilter>('active');
   // Server rule: only the metastore OWNER may create users; gate on the
   // metastore owner-side signal (fail-open when identity is unknown).
   const canCreateUser = useAuthorized([
@@ -52,6 +69,16 @@ export default function UsersList() {
     [data],
   );
 
+  const inactiveCount = useMemo(() => users.filter(isInactive).length, [users]);
+
+  const visibleUsers = useMemo(
+    () =>
+      users.filter((user) =>
+        status === 'inactive' ? isInactive(user) : !isInactive(user),
+      ),
+    [users, status],
+  );
+
   return (
     <>
       <ListLayout<UserRow>
@@ -65,6 +92,22 @@ export default function UsersList() {
             <Typography.Title level={2}>
               <TeamOutlined /> Users
             </Typography.Title>
+            {/* The inactive count is on the control on purpose: deactivated
+                accounts are the queue that permanent deletion works through,
+                and nobody switches to a tab they cannot tell is empty. */}
+            <Segmented<StatusFilter>
+              value={status}
+              onChange={setStatus}
+              options={[
+                { label: 'Active', value: 'active' },
+                {
+                  label: inactiveCount
+                    ? `Inactive (${inactiveCount})`
+                    : 'Inactive',
+                  value: 'inactive',
+                },
+              ]}
+            />
             <Tooltip
               title={
                 canCreateUser.ready && !canCreateUser.allowed
@@ -82,7 +125,7 @@ export default function UsersList() {
             </Tooltip>
           </Flex>
         }
-        data={users}
+        data={visibleUsers}
         onRowClick={(record) => setSelectedUser(record)}
         rowKey={(record) => `user-${record.id}`}
         columns={[
@@ -112,13 +155,21 @@ export default function UsersList() {
             title: 'Status',
             dataIndex: 'active',
             key: 'active',
-            width: '10%',
-            render: (value) =>
-              value ? (
-                <Tag color="green">Active</Tag>
-              ) : (
-                <Tag color="default">Inactive</Tag>
-              ),
+            width: '16%',
+            render: (value, record) => (
+              <Flex align="center" gap="small" wrap="wrap">
+                {value ? (
+                  <Tag color="green">Active</Tag>
+                ) : (
+                  <Tag color="default">Inactive</Tag>
+                )}
+                {admins?.has(primaryEmailOf(record)) && (
+                  <Tooltip title="Holds OWNER on the metastore: authorized for every securable.">
+                    <Tag color="gold">Admin</Tag>
+                  </Tooltip>
+                )}
+              </Flex>
+            ),
           },
           {
             title: 'Created',
@@ -141,6 +192,10 @@ export default function UsersList() {
               return principal ? (
                 <UserActionsDropdown
                   principal={principal}
+                  userId={record.id}
+                  active={!isInactive(record)}
+                  isAdmin={admins?.has(principal)}
+                  displayName={record.displayName}
                   onShowAccessDetails={() => setAccessDetailsUser(record)}
                 />
               ) : null;

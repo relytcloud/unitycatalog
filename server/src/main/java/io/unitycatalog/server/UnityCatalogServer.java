@@ -39,6 +39,7 @@ import io.unitycatalog.server.service.DeltaCommitsService;
 import io.unitycatalog.server.service.ExternalLocationService;
 import io.unitycatalog.server.service.FunctionService;
 import io.unitycatalog.server.service.IcebergRestCatalogService;
+import io.unitycatalog.server.service.MetastoreAdminService;
 import io.unitycatalog.server.service.MetastoreService;
 import io.unitycatalog.server.service.ModelService;
 import io.unitycatalog.server.service.PermissionService;
@@ -182,6 +183,8 @@ public class UnityCatalogServer {
     SelfCapabilitiesService selfCapabilitiesService =
         new SelfCapabilitiesService(
             authorizer, repositories, unityCatalogServerBuilder.serverProperties);
+    MetastoreAdminService metastoreAdminService =
+        new MetastoreAdminService(authorizer, repositories);
     CatalogService catalogService = new CatalogService(authorizer, repositories);
     SchemaService schemaService = new SchemaService(authorizer, repositories);
     VolumeService volumeService = new VolumeService(authorizer, repositories);
@@ -229,6 +232,7 @@ public class UnityCatalogServer {
             requestConverterFunction,
             scimResponseConverterFunction)
         .annotatedService(CONTROL_PATH + "auth/capabilities", selfCapabilitiesService)
+        .annotatedService(CONTROL_PATH + "metastore/admins", metastoreAdminService)
         .annotatedService(BASE_PATH + "permissions", permissionService)
         .annotatedService(BASE_PATH + "catalogs", catalogService, requestConverterFunction)
         .annotatedService(BASE_PATH + "schemas", schemaService, requestConverterFunction)
