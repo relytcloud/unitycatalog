@@ -118,6 +118,13 @@ public abstract class BaseServerTest {
         serverConfig.setServerUrl("http://localhost:" + port);
         return;
       } catch (RuntimeException e) {
+        // Whatever did bind has to be released before trying again: a half-started server left
+        // listening would still answer requests aimed at the one this test ends up using.
+        try {
+          server.stop();
+        } catch (RuntimeException ignored) {
+          // Nothing started, or it is already down; the original failure is the one that matters.
+        }
         if (attempt == START_ATTEMPTS || !isAddressInUse(e)) {
           throw e;
         }
