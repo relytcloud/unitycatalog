@@ -6,6 +6,7 @@ import io.unitycatalog.server.service.credential.CloudCredentialVendor;
 import io.unitycatalog.server.utils.ServerProperties;
 import io.unitycatalog.server.utils.ServerProperties.Property;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -86,21 +87,90 @@ public abstract class BaseServerTest {
       ServerProperties initServerProperties = new ServerProperties(serverProperties);
       setUpCredentialOperations(initServerProperties);
       hibernateConfigurator = new HibernateConfigurator(initServerProperties);
-      unityCatalogServer =
-          UnityCatalogServer.builder()
-              .port(port)
-              .serverProperties(initServerProperties)
-              .credentialOperations(cloudCredentialVendor)
-              .build();
-      unityCatalogServer.start();
-      serverConfig.setServerUrl("http://localhost:" + port);
+      startOnAFreePort(port, initServerProperties);
     }
   }
 
-  /** Finds an available port for the UC server. */
+  /**
+   * Starts the server, retrying on a fresh port if the chosen one was taken in the meantime.
+   *
+   * <p>Picking a port and binding it are separate steps: {@link #findAvailablePort()} closes its
+   * socket before returning, and the server only binds after Hibernate and the credential vendor
+   * are built. On a loaded CI runner — several test JVMs at once — that window is wide enough for
+   * something else to take the port, and the server needs two of them, since it also listens on
+   * {@code port + 1}. The failure surfaced as {@code bind(..) failed: Address already in use}
+   * thrown from setUp, which fails every test in the class for a reason that has nothing to do with
+   * them.
+   */
+  private void startOnAFreePort(int firstAttemptPort, ServerProperties properties)
+      throws IOException {
+    int port = firstAttemptPort;
+    for (int attempt = 1; ; attempt++) {
+      UnityCatalogServer server =
+          UnityCatalogServer.builder()
+              .port(port)
+              .serverProperties(properties)
+              .credentialOperations(cloudCredentialVendor)
+              .build();
+      try {
+        server.start();
+        unityCatalogServer = server;
+        serverConfig.setServerUrl("http://localhost:" + port);
+        return;
+      } catch (RuntimeException e) {
+        // Whatever did bind has to be released before trying again: a half-started server left
+        // listening would still answer requests aimed at the one this test ends up using.
+        try {
+          server.stop();
+        } catch (RuntimeException ignored) {
+          // Nothing started, or it is already down; the original failure is the one that matters.
+        }
+        if (attempt == START_ATTEMPTS || !isAddressInUse(e)) {
+          throw e;
+        }
+        System.out.println("Port " + port + " was taken before the server bound it; retrying");
+        port = findAvailablePort();
+      }
+    }
+  }
+
+  /** How many times to re-pick a port before giving up; the race is rare, so a few is plenty. */
+  private static final int START_ATTEMPTS = 5;
+
+  /** Whether the failure is the port race rather than something worth reporting. */
+  private static boolean isAddressInUse(Throwable failure) {
+    for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+      if (cause instanceof BindException) {
+        return true;
+      }
+      String message = cause.getMessage();
+      if (message != null && message.contains("Address already in use")) {
+        return true;
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Finds an available port for the UC server. Both this port and the next one must be free: the
+   * given port serves the URL transcoder and {@code port + 1} the API itself.
+   */
   private int findAvailablePort() throws IOException {
-    try (ServerSocket socket = new ServerSocket(0)) {
-      return socket.getLocalPort();
+    for (int attempt = 1; ; attempt++) {
+      int candidate;
+      try (ServerSocket socket = new ServerSocket(0)) {
+        candidate = socket.getLocalPort();
+      }
+      try (ServerSocket ignored = new ServerSocket(candidate + 1)) {
+        return candidate;
+      } catch (IOException neighbourTaken) {
+        if (attempt == START_ATTEMPTS) {
+          return candidate; // Let the start attempt report it.
+        }
+      }
     }
   }
 

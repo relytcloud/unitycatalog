@@ -87,6 +87,33 @@ only to owners/admins. Consequently:
   permissions" button) and the same warning is shown in the drawer. See
   `src/hooks/userAccess.ts`.
 
+**Ownership is the exception.** `GET /scim2/Users/{id}/ownedObjects` answers
+"what does this user own?" with one indexed query per securable type, because
+ownership is a column on each object rather than something that has to be
+inferred from the permission graph. The delete dialog uses it freely
+(`src/hooks/users.ts`, `useUserOwnedObjects`); it is not the expensive scan
+above and carries none of its warnings.
+
+### Deactivating and deleting users
+
+Two separate actions in the row menu, and the difference matters:
+
+- **Deactivate** (`PATCH /scim2/Users/{id}`) flips one flag. The user is
+  refused on every request from that moment — the server re-reads their state
+  per call, so tokens already issued stop working at once — while their grants,
+  the objects they own and their email are left exactly as they were. One click
+  undoes it. A `PUT` would also work but writes back the whole resource, so the
+  patch is used to guarantee nothing else changes.
+- **Delete permanently** (`DELETE /scim2/Users/{id}?purge=true`) removes the
+  record. Its only effect beyond deactivation is freeing the email and
+  externalId for reuse, so it is offered only for an already-deactivated user.
+  The dialog shows what the user owns and requires a principal to inherit it,
+  plus the user's principal typed back — the list mixes people with Relyt
+  instance principals, which look alike.
+
+Every guard is enforced by the server (see `Scim2UserService`); the gating here
+is guidance, exactly as in "Button gating" below.
+
 ### Button gating (positive signals only)
 
 Action buttons render enabled only on a *positive* authorization signal

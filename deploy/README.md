@@ -294,11 +294,17 @@ friends run server-side); the administrator, as metastore owner, sees everything
 `deploy-uc.sh` warns when authorization is on but neither entry point is configured, since nobody
 could sign in.
 
-**Signing in with an access token.** Whoever runs the server can sign in with the token it writes
-to `etc/conf/token.txt` at `<ui>/login/token`, pasting it into the form or opening
+**Signing in with an access token.** Paste a **user's** access token at `<ui>/login/token`, or open
 `<ui>/login/token?token=<token>`; the page drops the token from the address bar once it is used.
 The server verifies the token the way it verifies any request and hands it back as the session
-cookie, so the session ends when the token does.
+cookie, so the session ends when the token does. You are signed in as the user the token's `sub`
+names, with exactly that user's privileges.
+
+> ⚠️ The token in `etc/conf/token.txt` **cannot sign in.** Its `sub` is `server` — it is the
+> server's own service token — and no user with that email is ever created, so
+> `/auth/token/login` refuses it with `no enabled user named 'server'`. To get a token that can
+> sign in, exchange one at `/auth/tokens`, or sign in at `<ui>/login/admin` and take the `UC_TOKEN`
+> cookie.
 
 Earlier versions had the UI server inject that token into every API call instead, which made the
 UI's own address a way into an authorized server with no sign-in at all. The UI server now adds no
@@ -436,6 +442,69 @@ Set `UC_ADMIN_PASSWORD` and open `<ui>/login/admin`. The username is the built-i
 password is stored in the rendered `server.properties` alongside the other secrets and compared in
 constant time; a failed attempt is delayed by a second, which slows but does not stop guessing — use
 a long random value and keep the UI behind your usual network controls.
+
+#### `admin` is a break-glass account, not an operations account
+
+Being an administrator is not an account type in UC; it is a fact: the user holds `OWNER` on the
+metastore resource. That is exactly what `metastore_admin` from `GET /auth/capabilities` reports.
+In principle it can be granted and revoked, and several people can hold it at once.
+
+On the UI's Users page an administrator can "Make administrator" / "Withdraw administrator" for any
+**active** account, and administrators carry an `Admin` tag in the list. The endpoints behind it:
+
+```bash
+# Promote
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  "$UC_URL/api/1.0/unity-control/metastore/admins/ops@corp.com"
+
+# Withdraw
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "$UC_URL/api/1.0/unity-control/metastore/admins/ops@corp.com"
+
+# See who they are (nothing else shows this: OWNER is filtered out of /permissions)
+curl -H "Authorization: Bearer $TOKEN" \
+  "$UC_URL/api/1.0/unity-control/metastore/admins"
+```
+
+**Any administrator may promote and withdraw, not just the built-in `admin`.** Metastore OWNER is
+already the top of the privilege lattice, so an administrator granting one has escalated nobody
+past themselves; restricting it to `admin` would instead drag the break-glass password account into
+routine administration, which is the habit this section warns against.
+
+The server holds two lines: a deactivated account cannot be made an administrator (it cannot sign
+in, so it would only obscure who is really in charge), and **at least one enabled administrator
+must remain** after a withdrawal. The second is not ceremony: `UnityAccessUtil#initializeAdmin`
+re-grants OWNER only when the `admin` user does not exist *at all*, so an `admin` row that survives
+without the privilege is never repaired by a restart.
+
+> Background: `OWNER` is deliberately absent from the public `Privilege` enum, so it cannot travel
+> through `/permissions` — hence the dedicated endpoints above. It is kept out of that enum because
+> the enum is shared by every securable: admitting `OWNER` would simultaneously open ownership
+> transfer on catalogs, schemas and tables, which is a separate feature needing its own design.
+
+**Run day-to-day administration from real accounts holding metastore OWNER, not from a shared
+`admin` password.** Three reasons:
+
+1. **It bypasses every Entra control.** `<ui>/login/admin` never touches Entra, so MFA, conditional
+   access and "disabled on termination" do not apply to it. Share the password and someone disabled
+   in Entra after leaving still signs in to UC with the copy they kept.
+2. **It destroys attribution.** In the server log — and in any audit record built later — the actor
+   is always `admin`, with no way to tell who acted. For deleting users, reassigning ownership or
+   handing out cloud credentials, that is the same as having no audit trail.
+3. **It is the only way back in, and using it routinely is how you lose it.** The `admin` account
+   itself can be deactivated or have its privileges reduced (see the comment on
+   `UnityAccessUtil.initializeAdmin`), and the password sign-in **does not check that the account
+   still exists or is still ENABLED**. Once it is disabled or deleted, `<ui>/login/admin` still
+   returns success and sets the cookie, but every subsequent API call is rejected with 403 — a
+   dead end that looks like a working session. Keeping it for emergencies avoids ever getting there.
+
+**In production, leave `UC_ADMIN_PASSWORD` empty.** With it empty, `GET /auth/providers` does not
+report `admin_login` and the `<ui>/login/admin` entry point exists neither on the login page nor on
+the server. Set it and restart only when you actually need it (Entra outage, every administrator
+locked out), then clear it again.
+
+> `<ui>/login/token` is a break-glass entry point of the same kind and should likewise not be a daily
+> habit; the `etc/conf/token.txt` token it uses never expires — see [Security notes](#security-notes).
 
 ### How programs reach UC
 

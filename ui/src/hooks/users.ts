@@ -99,6 +99,235 @@ export function useScimUserOptions() {
   }, [data]);
 }
 
+export interface OwnedObjectInterface
+  extends Model<ControlComponent, 'OwnedObject'> {}
+
+/**
+ * Everything a user owns, for the delete confirmation.
+ *
+ * Disabled until asked for: it is cheap on the server (one indexed query per
+ * securable type, unlike the per-object walk in `useUserAccessScan`) but there
+ * is no reason to run it for every row of the Users table.
+ */
+export function useUserOwnedObjects(id: string | undefined, enabled: boolean) {
+  return useQuery<
+    SuccessResponseBody<
+      ControlApi,
+      '/scim2/Users/{id}/ownedObjects',
+      'get',
+      'application/json'
+    >
+  >({
+    queryKey: ['userOwnedObjects', id],
+    enabled: enabled && !!id,
+    queryFn: async () => {
+      const response = await (route as Route<ControlApi>)({
+        client: CLIENT,
+        request: {
+          path: '/scim2/Users/{id}/ownedObjects',
+          method: 'get',
+          params: { paths: { id: id! } },
+        },
+        config: { baseURL: UC_AUTH_API_PREFIX },
+        errorMessage: 'Failed to fetch the objects this user owns',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      }
+      return response.data;
+    },
+  });
+}
+
+export interface SetScimUserActiveParams {
+  id: string;
+  active: boolean;
+}
+
+/**
+ * Deactivates or reactivates a user.
+ *
+ * Deliberately a SCIM patch rather than a DELETE: both flip the same flag, but
+ * a patch only ever touches `active`, whereas a PUT would write back whatever
+ * else the request body happened to carry. Deactivation takes effect on the
+ * next request the user makes — the server re-reads their state every time, so
+ * tokens already issued stop working at once — and nothing else about them
+ * changes, which is what makes it reversible.
+ */
+export function useSetScimUserActive() {
+  const queryClient = useQueryClient();
+
+  return useMutation<unknown, Error, SetScimUserActiveParams>({
+    mutationFn: async ({ id, active }: SetScimUserActiveParams) => {
+      const response = await (route as Route<ControlApi>)({
+        client: CLIENT,
+        request: {
+          path: '/scim2/Users/{id}',
+          method: 'patch',
+          params: {
+            paths: { id },
+            body: {
+              schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+              // A pathless `replace` is the only shape the server honours, and RFC 7644 §3.5.2.1
+              // requires its value to be the object of attributes to replace — not a bare scalar.
+              // The SCIM library enforces that while deserialising, so `value: active` never
+              // reaches the service: it fails as a 500 before any handler runs.
+              Operations: [{ op: 'replace', value: { active } }],
+            },
+          },
+        },
+        config: { baseURL: UC_AUTH_API_PREFIX },
+        errorMessage: active
+          ? 'Failed to reactivate user'
+          : 'Failed to deactivate user',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      }
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['listScimUsers'] });
+    },
+  });
+}
+
+export interface PurgeScimUserParams {
+  id: string;
+  /** The user's principal, repeated back — the server rejects a mismatch. */
+  principal: string;
+  /** Who takes over the user's objects; omitted when they own nothing. */
+  reassignTo?: string;
+}
+
+/**
+ * Permanently removes a user.
+ *
+ * This is what frees the email and externalId for reuse; it does not block
+ * access any harder than deactivation, which the server already enforces on
+ * every request. Every guard lives on the server (deactivated first, not
+ * yourself, not the built-in admin, an administrator left over, a valid
+ * reassignment target) — what the UI does here is keep the caller from
+ * reaching an obviously refused state, and surface the refusal when it comes.
+ */
+export function usePurgeScimUser() {
+  const queryClient = useQueryClient();
+
+  return useMutation<unknown, Error, PurgeScimUserParams>({
+    mutationFn: async ({ id, principal, reassignTo }: PurgeScimUserParams) => {
+      const response = await (route as Route<ControlApi>)({
+        client: CLIENT,
+        request: {
+          path: '/scim2/Users/{id}',
+          method: 'delete',
+          params: {
+            paths: { id },
+            query: {
+              purge: true,
+              confirm_principal: principal,
+              ...(reassignTo ? { reassign_to: reassignTo } : {}),
+            },
+          },
+        },
+        config: { baseURL: UC_AUTH_API_PREFIX },
+        errorMessage: 'Failed to delete user',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      }
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['listScimUsers'] });
+    },
+  });
+}
+
+/**
+ * The metastore's administrators, as a set of principals.
+ *
+ * Nothing else exposes this: OWNER is filtered out of /permissions responses,
+ * so a user list cannot otherwise tell an administrator from anyone else.
+ * Readable only by an administrator, so a failure means "cannot tell" rather
+ * than "there are none" — callers render nothing rather than guessing.
+ */
+export function useMetastoreAdmins() {
+  return useQuery<Set<string>>({
+    queryKey: ['metastoreAdmins'],
+    queryFn: async () => {
+      try {
+        const response = await (route as Route<ControlApi>)({
+          client: CLIENT,
+          request: { path: '/metastore/admins', method: 'get' },
+          config: { baseURL: UC_AUTH_API_PREFIX },
+          errorMessage: 'Failed to fetch administrators',
+        }).call();
+        if (isError(response)) return new Set<string>();
+        return new Set<string>(response.data.admins ?? []);
+      } catch {
+        return new Set<string>();
+      }
+    },
+  });
+}
+
+export interface MetastoreAdminMutationParams {
+  /** The user's principal (email). */
+  email: string;
+  /** True to make them an administrator, false to withdraw it. */
+  admin: boolean;
+}
+
+/**
+ * Makes a user an administrator, or withdraws it.
+ *
+ * Any administrator may do either — metastore OWNER is the top of the
+ * privilege lattice, so granting one escalates nobody past the grantor. The
+ * server keeps the invariant that matters: one enabled administrator always
+ * remains.
+ */
+export function useSetMetastoreAdmin() {
+  const queryClient = useQueryClient();
+
+  return useMutation<unknown, Error, MetastoreAdminMutationParams>({
+    mutationFn: async ({ email, admin }: MetastoreAdminMutationParams) => {
+      const response = await (route as Route<ControlApi>)({
+        client: CLIENT,
+        request: {
+          path: '/metastore/admins/{email}',
+          method: admin ? 'put' : 'delete',
+          params: { paths: { email } },
+        },
+        config: { baseURL: UC_AUTH_API_PREFIX },
+        errorMessage: admin
+          ? 'Failed to make user an administrator'
+          : 'Failed to withdraw the administrator privilege',
+      }).call();
+      if (isError(response)) {
+        // NOTE:
+        // When an expected error occurs, as defined in the OpenAPI specification, the following line will
+        // be executed. This block serves as a placeholder for expected errors.
+        return assertNever(response.data.status);
+      }
+      return response.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['metastoreAdmins'] });
+      // The caller may have just changed their own standing.
+      queryClient.invalidateQueries({ queryKey: ['isMetastoreAdmin'] });
+    },
+  });
+}
+
 export interface CreateScimUserMutationParams
   extends RequestBody<ControlApi, '/scim2/Users', 'post'> {}
 

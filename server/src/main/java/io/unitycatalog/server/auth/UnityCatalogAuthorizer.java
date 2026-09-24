@@ -41,4 +41,18 @@ public interface UnityCatalogAuthorizer {
   List<Privileges> listAuthorizations(UUID principal, UUID resource);
 
   Map<UUID, List<Privileges>> listAuthorizations(UUID resource);
+
+  /**
+   * Every authorization held by one principal, keyed by the resource it applies to.
+   *
+   * <p>The inverse of {@link #listAuthorizations(UUID)}, and the only way to answer "what does this
+   * user hold?" without walking the whole catalog tree and asking per object. Deleting a user needs
+   * exactly this: the resources they own have to be handed to someone else before their policies go
+   * away.
+   *
+   * <p>The resources are whatever the policy store still names, which is not the same as what still
+   * exists — deleting a catalog does not clear the policies of the schemas and tables under it (see
+   * CatalogService#deleteCatalog), so callers that resolve these ids must tolerate misses.
+   */
+  Map<UUID, List<Privileges>> listAuthorizationsForPrincipal(UUID principal);
 }

@@ -77,4 +77,9 @@ public class AllowingAuthorizer implements UnityCatalogAuthorizer {
   public Map<UUID, List<Privileges>> listAuthorizations(UUID resource) {
     return Map.of();
   }
+
+  @Override
+  public Map<UUID, List<Privileges>> listAuthorizationsForPrincipal(UUID principal) {
+    return Map.of();
+  }
 }

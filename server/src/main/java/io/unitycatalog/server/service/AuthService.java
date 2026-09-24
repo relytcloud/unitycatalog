@@ -36,6 +36,7 @@ import io.unitycatalog.control.model.OAuthTokenExchangeInfo;
 import io.unitycatalog.control.model.TokenEndpointExtensionType;
 import io.unitycatalog.control.model.TokenType;
 import io.unitycatalog.control.model.User;
+import io.unitycatalog.server.exception.BaseException;
 import io.unitycatalog.server.exception.ErrorCode;
 import io.unitycatalog.server.exception.GlobalExceptionHandler;
 import io.unitycatalog.server.exception.OAuthInvalidRequestException;
@@ -556,6 +557,12 @@ public class AuthService {
           ErrorCode.UNAUTHENTICATED, "Wrong username or password");
     }
 
+    // The password alone does not make a session. The account it names must exist and be enabled,
+    // exactly as AuthDecorator requires of every request made with the result. Without this a
+    // deactivated administrator still got a session and then had every request refused — a sign-in
+    // that looked like it worked, with nothing saying why nothing else did.
+    requireTheAdminAccountCanSignIn();
+
     String accessToken =
         securityContext.createAccessToken(ADMIN_USERNAME, serverProperties.getAccessTokenTtl());
     OAuthTokenExchangeInfo info =
@@ -570,6 +577,33 @@ public class AuthService {
             .add(HttpHeaderNames.SET_COOKIE, session.toSetCookieHeader())
             .build(),
         info);
+  }
+
+  /**
+   * Refuses the password sign-in when the {@code admin} account cannot actually be used.
+   *
+   * <p>The password is checked against configuration, not against the user table, so on its own it
+   * says nothing about whether the account still exists or is still enabled. Both are required of
+   * every request the resulting session makes, so letting the sign-in succeed regardless produced a
+   * session that could do nothing at all.
+   */
+  private void requireTheAdminAccountCanSignIn() {
+    User admin;
+    try {
+      admin = userRepository.getUserByEmail(ADMIN_USERNAME);
+    } catch (BaseException e) {
+      LOGGER.warn(
+          "Administrator sign-in rejected: no '{}' account on this metastore", ADMIN_USERNAME);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAUTHENTICATED, "The administrator account does not exist on this metastore.");
+    }
+    if (admin.getState() != User.StateEnum.ENABLED) {
+      LOGGER.warn(
+          "Administrator sign-in rejected: the '{}' account is deactivated", ADMIN_USERNAME);
+      throw new OAuthInvalidRequestException(
+          ErrorCode.UNAUTHENTICATED,
+          "The administrator account is deactivated; another administrator can reactivate it.");
+    }
   }
 
   /**
