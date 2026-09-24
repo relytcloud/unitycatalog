@@ -136,7 +136,10 @@ public class UserCli {
 
   private static String deleteUser(UsersApi usersApi, JSONObject json) throws ApiException {
     String id = json.getString(CliParams.ID.getServerParam());
-    usersApi.deleteUser(id);
+    // Deactivation, which is what this command has always done. The remaining arguments are
+    // purge / reassign_to / confirm_principal: purging is irreversible and needs the principal
+    // typed back, so it stays out of a positional CLI argument for now.
+    usersApi.deleteUser(id, null, null, null);
     return EMPTY;
   }
 
