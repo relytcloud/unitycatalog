@@ -73,3 +73,8 @@ Feature history of this fork, by PR merge date.
 
 - features: —
 - bugfix: Behind a reverse proxy that serves this server under a path prefix and strips it before forwarding, hosted login failed at the callback with "Missing login state". `/auth/login` scoped the `UC_OAUTH_STATE` cookie to the mount path the server sees (`/api/1.0/unity-control/auth`), while the browser comes back to `/callback` under the prefix, so the cookie was never sent. The state cookie is now set and cleared on the path the browser actually uses -- the path of `server.external-url` followed by the mount path -- which is the directory of the `redirect_uri` the provider is handed. Deployments whose `server.external-url` carries no path are unaffected, and `UC_TOKEN` stays at `Path=/`. Reaching this through the bundled deploy scripts additionally needs #22, which lifts the host-only check `deploy-uc.sh` applies to `UC_EXTERNAL_URL`.
+
+#24 (https://github.com/relytcloud/unitycatalog/pull/24)
+
+- features: —
+- bugfix: `deploy-uc.sh` accepts a path in `UC_EXTERNAL_URL` (`https://api.example.com/unitycatalog`), which the #21 state-cookie fix depends on and which the script rejected outright, so the fix could not be reached through the repo's own deployment path. Trailing slash, empty segment, query, fragment and a missing scheme are still rejected. The sample file and both deployment guides now describe the behind-a-prefix case and the redirect URI to register.

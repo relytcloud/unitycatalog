@@ -117,12 +117,17 @@ done
 [ "$UC_AUTHORIZATION" = "enable" ] && [ "$login_set" -eq 0 ] && [ -z "$UC_ADMIN_PASSWORD" ] && \
   echo "WARN: authorization is on but neither Microsoft sign-in nor UC_ADMIN_PASSWORD is set: nobody can sign in to the UI"
 
-# UC_EXTERNAL_URL overrides what the server would otherwise derive, and two things depend on it:
-# the redirect_uri handed to the identity provider, which must equal the registered one byte for
-# byte, and whether the session cookie is marked Secure. A path here silently breaks the first; the
-# property's own validator only checks that the value parses as a URL, so check the shape.
-if [ -n "$UC_EXTERNAL_URL" ] && ! [[ "$UC_EXTERNAL_URL" =~ ^https?://[^/]+$ ]]; then
-  echo "ERROR: UC_EXTERNAL_URL must be scheme://host[:port] with no path, e.g. https://uc.example.com"
+# UC_EXTERNAL_URL overrides what the server would otherwise derive: the redirect_uri handed to the
+# identity provider, which must equal the registered one byte for byte, and the path the OAuth
+# state cookie is scoped to. A path is legitimate here -- it is required when a gateway serves UC
+# under a prefix and strips it before forwarding, since the registered redirect_uri then carries
+# that prefix -- so accept scheme://host[:port][/segment...]. What is still rejected is what can
+# only be a slip: a trailing slash, an empty segment, a query or a fragment, a missing scheme. The
+# Secure flag on the session cookie reads only the scheme, so a path never affects it. The
+# property's own validator only checks that the value parses as a URL, hence this shape check.
+if [ -n "$UC_EXTERNAL_URL" ] && ! [[ "$UC_EXTERNAL_URL" =~ ^https?://[^/?#]+(/[^/?#]+)*$ ]]; then
+  echo "ERROR: UC_EXTERNAL_URL must be scheme://host[:port][/path], with no trailing slash, query or fragment,"
+  echo "       e.g. https://uc.example.com or https://api.example.com/unitycatalog"
   echo "       got: $UC_EXTERNAL_URL"
   exit 1
 fi

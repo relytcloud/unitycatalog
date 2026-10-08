@@ -196,9 +196,11 @@ public class ServerProperties {
     CLIENT_ID("server.client-id"),
     CLIENT_SECRET("server.client-secret"),
     REDIRECT_PORT("server.redirect-port", POSITIVE_INTEGER_VALIDATOR),
-    // Base URL at which browsers reach this server (scheme + host [+ port]), used to build the
-    // OAuth redirect_uri for the server-hosted login flow. Optional: when unset it is derived
-    // from X-Forwarded-Proto / X-Forwarded-Host or the Host header of the incoming request.
+    // Base URL at which browsers reach this server, used to build the OAuth redirect_uri for the
+    // server-hosted login flow; its path, if any, also scopes the OAuth state cookie, which is how
+    // the flow survives a gateway that serves this server under a prefix and strips it. Optional:
+    // when unset it is derived from X-Forwarded-Proto / X-Forwarded-Host or the Host header of
+    // the incoming request.
     EXTERNAL_URL("server.external-url", URL_VALIDATOR),
     // Password for signing the built-in "admin" account into the UI (issue #15). Blank = off.
     ADMIN_PASSWORD("server.admin-password"),

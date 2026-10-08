@@ -104,7 +104,7 @@ PORT=3000 HOST=0.0.0.0 node ui/server.js
 | `UC_TOKEN_URL` | no | provider's OAuth token endpoint, e.g. `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token` |
 | `UC_CLIENT_ID` | no | client id of the application registered for the UI login; must also be listed in `UC_AUDIENCES` |
 | `UC_CLIENT_SECRET` | no | that application's client secret — stays on the server, never sent to the browser |
-| `UC_EXTERNAL_URL` | no | browser-facing base URL of UC (`https://uc.example.com`) when a proxy in front does not send `X-Forwarded-Proto`/`X-Forwarded-Host`; blank = derived from the request |
+| `UC_EXTERNAL_URL` | no | browser-facing base URL of UC, `scheme://host[:port]` plus the path prefix when a gateway serves UC under one (`https://uc.example.com`, or `https://api.example.com/unitycatalog`). Needed when a proxy in front does not send `X-Forwarded-Proto`/`X-Forwarded-Host`, and whenever a prefix is stripped before the request reaches UC; blank = derived from the request. See [Behind a path prefix](#behind-a-path-prefix) |
 | `UC_ADMIN_PASSWORD` | no | password of the built-in `admin` for the UI's administrator sign-in at `<ui>/login/admin`. Blank = that entry point off. See [UI sign-in](#ui-sign-in) |
 | `ALIYUN_REGION` | **yes** | e.g. `cn-hangzhou` |
 | `ALIYUN_ACCESS_KEY` | **yes** | master RAM user AK (used for STS `AssumeRole`) |
@@ -371,6 +371,24 @@ Multi-tenant (`common` / `organizations`) endpoints advertise the literal issuer
 
 The UI proxy forwards `X-Forwarded-Proto`/`X-Forwarded-Host` so UC can build the callback URL the
 browser actually uses; set `UC_EXTERNAL_URL` if another proxy in front strips them.
+
+##### Behind a path prefix
+
+A gateway may serve UC under a prefix and strip it before forwarding: the browser is on
+`https://api.example.com/unitycatalog/...` while the server receives `/...`. Nothing in the request
+tells the server about the prefix, yet two things it hands the browser must carry it — the
+`redirect_uri` sent to the identity provider (the registered one carries the prefix) and the path
+the OAuth state cookie is scoped to (a cookie scoped to the unprefixed path is never sent back to
+`/unitycatalog/.../callback`, and the sign-in fails with `Missing login state` after Microsoft has
+already authenticated the person). Put the prefix in `UC_EXTERNAL_URL`:
+
+```bash
+UC_EXTERNAL_URL=https://api.example.com/unitycatalog
+```
+
+and register `https://api.example.com/unitycatalog/api/1.0/unity-control/auth/callback` in Entra.
+`deploy-uc.sh` accepts the path; it still rejects a trailing slash, a query or a fragment. Deployments
+at the root of their host are unaffected by leaving the path out.
 
 #### 3. Provisioning users
 
