@@ -48,6 +48,7 @@ import io.unitycatalog.server.utils.JwksOperations;
 import io.unitycatalog.server.utils.ServerProperties;
 import io.unitycatalog.server.utils.ServerProperties.Property;
 import java.lang.reflect.ParameterizedType;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -298,7 +299,7 @@ public class AuthService {
 
     Cookie stateCookie =
         createCookie(
-            ctx, OAUTH_STATE_COOKIE, state + "|" + returnTo, authMountPath(ctx), OAUTH_STATE_TTL);
+            ctx, OAUTH_STATE_COOKIE, state + "|" + returnTo, browserAuthPath(ctx), OAUTH_STATE_TTL);
     return HttpResponse.of(
         ResponseHeaders.builder(HttpStatus.FOUND)
             .add(HttpHeaderNames.LOCATION, location)
@@ -351,7 +352,7 @@ public class AuthService {
     String cookieTimeout = this.serverProperties.get(Property.COOKIE_TIMEOUT);
     Cookie sessionCookie =
         createCookie(ctx, AuthDecorator.UC_TOKEN_KEY, accessToken, "/", cookieTimeout);
-    Cookie clearedState = createCookie(ctx, OAUTH_STATE_COOKIE, "", authMountPath(ctx), "PT0S");
+    Cookie clearedState = createCookie(ctx, OAUTH_STATE_COOKIE, "", browserAuthPath(ctx), "PT0S");
     return HttpResponse.of(
         ResponseHeaders.builder(HttpStatus.FOUND)
             .add(HttpHeaderNames.LOCATION, returnTo)
@@ -470,6 +471,22 @@ public class AuthService {
       base = scheme + "://" + host;
     }
     return base + authMountPath(ctx) + "/callback";
+  }
+
+  /**
+   * The auth mount path as the browser sees it, which is what the state cookie must be scoped to.
+   *
+   * <p>Behind a gateway that serves this server under a prefix and strips it before forwarding
+   * (server.external-url=https://api.example.com/unitycatalog), the server sees
+   * /api/1.0/unity-control/auth while the browser is on /unitycatalog/api/1.0/unity-control/auth. A
+   * cookie scoped to the former is never sent to /callback, which then fails with "Missing login
+   * state". The prefix is the path of server.external-url, the same base callbackUrl builds the
+   * redirect URI from; without it the two paths are the same.
+   */
+  private String browserAuthPath(ServiceRequestContext ctx) {
+    String base = serverProperties.getExternalUrl();
+    String prefix = base == null ? null : URI.create(base).getRawPath();
+    return (prefix == null ? "" : prefix) + authMountPath(ctx);
   }
 
   /** The path this service is mounted at (e.g. /api/1.0/unity-control/auth), from the request. */
