@@ -98,7 +98,7 @@ PORT=3000 HOST=0.0.0.0 node ui/server.js
 | `UC_TOKEN_URL` | 否 | IdP 的 OAuth 令牌端点，如 `https://login.microsoftonline.com/<租户id>/oauth2/v2.0/token` |
 | `UC_CLIENT_ID` | 否 | 为 UI 登录注册的应用的 client id；`deploy-uc.sh` 会自动把它追加进 `UC_AUDIENCES` |
 | `UC_CLIENT_SECRET` | 否 | 该应用的 client secret，**只留在服务端**，不下发浏览器。有有效期，到期要轮换 |
-| `UC_EXTERNAL_URL` | 否 | 浏览器访问 UC 的基地址（如 `https://uc.example.com`），当前置代理不传 `X-Forwarded-Proto`/`X-Forwarded-Host` 时需要；留空则按请求推导 |
+| `UC_EXTERNAL_URL` | 否 | 浏览器访问 UC 的基地址，`scheme://host[:port]`，网关在前缀下提供 UC 时再加上该前缀（如 `https://uc.example.com`，或 `https://api.example.com/unitycatalog`）。前置代理不传 `X-Forwarded-Proto`/`X-Forwarded-Host` 时需要，前缀在到达 UC 前被剥掉时也需要；留空则按请求推导。见[网关加路径前缀](#网关加路径前缀) |
 | `UC_ADMIN_PASSWORD` | 否 | 内置 `admin` 在 `<ui>/login/admin` 的登录密码。留空 = 关闭该入口，见 [UI 登录](#ui-登录) |
 | `ALIYUN_REGION` | **是** | 如 `cn-hangzhou` |
 | `ALIYUN_ACCESS_KEY` | **是** | master RAM 用户 AK（用于 STS `AssumeRole`） |
@@ -312,6 +312,21 @@ OIDC discovery。
 
 UI 代理会转发 `X-Forwarded-Proto` / `X-Forwarded-Host`，UC 据此拼出浏览器实际使用的回调地址；若前面还有
 一层代理把这两个头去掉了，就填 `UC_EXTERNAL_URL`。
+
+##### 网关加路径前缀
+
+网关可能把 UC 挂在一个前缀下并在转发前剥掉它：浏览器访问的是 `https://api.example.com/unitycatalog/...`，
+服务端收到的却是 `/...`。请求里没有任何东西能告诉服务端这个前缀，但服务端交给浏览器的两样东西必须带着
+它——发给身份提供方的 `redirect_uri`（登记的那个带前缀），以及 OAuth state cookie 的作用域路径（按无前缀
+路径设置的 cookie 永远不会被带回 `/unitycatalog/.../callback`，于是在微软已经认证成功之后报
+`Missing login state`）。把前缀写进 `UC_EXTERNAL_URL`：
+
+```bash
+UC_EXTERNAL_URL=https://api.example.com/unitycatalog
+```
+
+并在 Entra 里登记 `https://api.example.com/unitycatalog/api/1.0/unity-control/auth/callback`。
+`deploy-uc.sh` 接受路径，仍拒绝结尾斜杠、查询串与片段。位于主机根路径的部署不填路径，行为不变。
 
 #### 3. 建用户
 
