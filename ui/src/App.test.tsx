@@ -5,6 +5,7 @@ import { NotificationProvider } from './utils/NotificationContext';
 import { appRoutes } from './App';
 import { useAuth } from './context/auth-context';
 import { useAuthProviders } from './hooks/auth-providers';
+import { useIsMetastoreAdmin } from './hooks/authz';
 
 // The real route table is under test, so only the leaves are replaced: the
 // identity hooks, the sign-in buttons that need a live SDK, and the two heavy
@@ -52,9 +53,25 @@ jest.mock(
       return <div>Catalogs page</div>;
     },
 );
+jest.mock(
+  './pages/UsersList',
+  () =>
+    function UsersList() {
+      return <div>Users page</div>;
+    },
+);
+jest.mock('./hooks/authz', () => ({
+  ...jest.requireActual('./hooks/authz'),
+  useIsMetastoreAdmin: jest.fn(),
+}));
 
 const mockUseAuth = useAuth as jest.Mock;
 const mockUseAuthProviders = useAuthProviders as jest.Mock;
+const mockUseIsMetastoreAdmin = useIsMetastoreAdmin as jest.Mock;
+
+function metastoreAdmin(isAdmin: boolean) {
+  mockUseIsMetastoreAdmin.mockReturnValue({ data: isAdmin, isPending: false });
+}
 
 function signedIn(user: object | null) {
   mockUseAuth.mockReturnValue({
@@ -92,6 +109,34 @@ describe('App routing', () => {
       },
       isPending: false,
     });
+    metastoreAdmin(false);
+  });
+
+  /**
+   * The user directory belongs to the metastore administrators: only they may
+   * create, deactivate or delete accounts. An ordinary user gets neither the
+   * menu entry nor the page, even by address.
+   */
+  it('keeps an ordinary user out of the user directory', async () => {
+    signedIn({ id: '1', displayName: 'Someone' });
+
+    const router = openAt('/users');
+
+    expect(await screen.findByText('Catalogs page')).toBeVisible();
+    await waitFor(() => expect(router.state.location.pathname).toBe('/'));
+    expect(screen.queryByText('Users page')).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Users' })).toBeNull();
+  });
+
+  it('shows the user directory to a metastore administrator', async () => {
+    metastoreAdmin(true);
+    signedIn({ id: '1', displayName: 'Admin' });
+
+    const router = openAt('/users');
+
+    expect(await screen.findByText('Users page')).toBeVisible();
+    expect(router.state.location.pathname).toBe('/users');
+    expect(screen.getByRole('menuitem', { name: 'Users' })).toBeVisible();
   });
 
   it('sends a visitor without a session away from the application', async () => {
