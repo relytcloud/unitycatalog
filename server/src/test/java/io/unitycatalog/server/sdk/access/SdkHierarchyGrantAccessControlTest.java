@@ -3,18 +3,29 @@ package io.unitycatalog.server.sdk.access;
 import static io.unitycatalog.server.utils.TestUtils.assertPermissionDenied;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.linecorp.armeria.client.WebClient;
+import com.linecorp.armeria.common.AggregatedHttpResponse;
+import com.linecorp.armeria.common.HttpData;
+import com.linecorp.armeria.common.HttpHeaderNames;
+import com.linecorp.armeria.common.HttpMethod;
+import com.linecorp.armeria.common.HttpStatus;
+import com.linecorp.armeria.common.RequestHeaders;
 import io.unitycatalog.client.ApiClient;
 import io.unitycatalog.client.api.CatalogsApi;
 import io.unitycatalog.client.api.GrantsApi;
 import io.unitycatalog.client.api.SchemasApi;
 import io.unitycatalog.client.api.TablesApi;
+import io.unitycatalog.client.api.TemporaryCredentialsApi;
 import io.unitycatalog.client.model.CreateCatalog;
 import io.unitycatalog.client.model.CreateSchema;
+import io.unitycatalog.client.model.GenerateTemporaryTableCredential;
 import io.unitycatalog.client.model.PermissionsChange;
 import io.unitycatalog.client.model.Privilege;
+import io.unitycatalog.client.model.PrivilegeAssignment;
 import io.unitycatalog.client.model.SchemaInfo;
 import io.unitycatalog.client.model.SecurableType;
 import io.unitycatalog.client.model.TableInfo;
+import io.unitycatalog.client.model.TableOperation;
 import io.unitycatalog.client.model.UpdatePermissions;
 import io.unitycatalog.server.base.ServerConfig;
 import io.unitycatalog.server.persist.model.Privileges;
@@ -274,6 +285,249 @@ public class SdkHierarchyGrantAccessControlTest extends SdkAccessControlBaseCRUD
     assertThat(listAllTables(regular2Tables, CATALOG, SCHEMA_NAME))
         .extracting(TableInfo::getName)
         .containsExactly("mine");
+  }
+
+  @Test
+  @SneakyThrows
+  public void catalogLevelModifyAndRevocationAreReservedToo() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    ServerConfig principal1Config = createTestUserServerConfig(PRINCIPAL_1);
+    GrantsApi principal1Grants = new GrantsApi(TestUtils.createApiClient(principal1Config));
+
+    assertPermissionDenied(
+        () ->
+            principal1Grants.update(
+                SecurableType.CATALOG, CATALOG, add(REGULAR_1, Privilege.MODIFY)));
+
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, CATALOG, Privileges.SELECT);
+    assertPermissionDenied(
+        () ->
+            principal1Grants.update(
+                SecurableType.CATALOG, CATALOG, remove(REGULAR_1, Privilege.SELECT)));
+    grantsApi.update(SecurableType.CATALOG, CATALOG, remove(REGULAR_1, Privilege.SELECT));
+  }
+
+  @Test
+  @SneakyThrows
+  public void ownerRequestMixingUseAndSelectIsRefusedAsAWhole() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    ServerConfig principal1Config = createTestUserServerConfig(PRINCIPAL_1);
+    GrantsApi principal1Grants = new GrantsApi(TestUtils.createApiClient(principal1Config));
+
+    // The check runs before anything is written, so the USE_* that the owner could have
+    // granted on its own does not land either: nothing half-applied to clean up.
+    assertPermissionDenied(
+        () ->
+            principal1Grants.update(
+                SecurableType.SCHEMA,
+                SCHEMA,
+                add(REGULAR_1, Privilege.USE_SCHEMA, Privilege.SELECT)));
+    assertPermissionDenied(
+        () ->
+            principal1Grants.update(
+                SecurableType.CATALOG,
+                CATALOG,
+                add(REGULAR_1, Privilege.USE_CATALOG, Privilege.MODIFY)));
+    assertThat(privilegesOf(REGULAR_1, SecurableType.SCHEMA, SCHEMA)).isEmpty();
+    assertThat(privilegesOf(REGULAR_1, SecurableType.CATALOG, CATALOG)).isEmpty();
+  }
+
+  @Test
+  @SneakyThrows
+  public void anAppointedMetastoreAdminGrantsAndRevokesWhatAnOwnerCannot() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    ServerConfig regular2Config = createTestUserServerConfig(REGULAR_2);
+    GrantsApi regular2Grants = new GrantsApi(TestUtils.createApiClient(regular2Config));
+    TablesApi principal1Tables =
+        new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(PRINCIPAL_1)));
+    TablesApi regular1Tables =
+        new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(REGULAR_1)));
+    createExternalTable(principal1Tables, CATALOG, SCHEMA_NAME, "t1", testDirectoryRoot + "/t1");
+
+    // regular-2 owns nothing; as a plain user it may grant nothing at all ...
+    assertPermissionDenied(
+        () ->
+            regular2Grants.update(
+                SecurableType.SCHEMA, SCHEMA, add(REGULAR_1, Privilege.USE_SCHEMA)));
+
+    // ... until admin appoints it a metastore administrator (OWNER on the metastore, the
+    // "super user"). From then on it may do what even the catalog's owner may not.
+    assertThat(setMetastoreAdmin(REGULAR_2, true).status()).isEqualTo(HttpStatus.OK);
+    regular2Grants.update(SecurableType.CATALOG, CATALOG, add(REGULAR_1, Privilege.USE_CATALOG));
+    regular2Grants.update(
+        SecurableType.SCHEMA, SCHEMA, add(REGULAR_1, Privilege.USE_SCHEMA, Privilege.SELECT));
+    assertThat(listAllTables(regular1Tables, CATALOG, SCHEMA_NAME))
+        .extracting(TableInfo::getName)
+        .containsExactly("t1");
+    regular2Grants.update(
+        SecurableType.CATALOG, CATALOG, add(REGULAR_1, Privilege.SELECT, Privilege.MODIFY));
+    regular2Grants.update(
+        SecurableType.CATALOG, CATALOG, remove(REGULAR_1, Privilege.SELECT, Privilege.MODIFY));
+    regular2Grants.update(SecurableType.SCHEMA, SCHEMA, remove(REGULAR_1, Privilege.SELECT));
+    assertThat(listAllTables(regular1Tables, CATALOG, SCHEMA_NAME)).isEmpty();
+
+    // Standing it down takes the ability away again.
+    assertThat(setMetastoreAdmin(REGULAR_2, false).status()).isEqualTo(HttpStatus.OK);
+    assertPermissionDenied(
+        () ->
+            regular2Grants.update(SecurableType.SCHEMA, SCHEMA, add(REGULAR_1, Privilege.SELECT)));
+  }
+
+  @Test
+  @SneakyThrows
+  public void holderOfAnInheritedSelectCanNeitherPassItOnNorGiveItUp() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    ServerConfig regular1Config = createTestUserServerConfig(REGULAR_1);
+    GrantsApi regular1Grants = new GrantsApi(TestUtils.createApiClient(regular1Config));
+    TablesApi regular1Tables = new TablesApi(TestUtils.createApiClient(regular1Config));
+    TablesApi regular2Tables =
+        new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(REGULAR_2)));
+    TablesApi principal1Tables =
+        new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(PRINCIPAL_1)));
+    createExternalTable(principal1Tables, CATALOG, SCHEMA_NAME, "t1", testDirectoryRoot + "/t1");
+
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, CATALOG, Privileges.USE_CATALOG);
+    grantPermissions(
+        REGULAR_1, SecurableType.SCHEMA, SCHEMA, Privileges.USE_SCHEMA, Privileges.SELECT);
+    assertThat(listAllTables(regular1Tables, CATALOG, SCHEMA_NAME)).hasSize(1);
+
+    // There is no grant option: holding a privilege never includes handing it to someone else,
+    // at this level or on a table beneath it, nor dropping it oneself.
+    assertPermissionDenied(
+        () ->
+            regular1Grants.update(SecurableType.SCHEMA, SCHEMA, add(REGULAR_2, Privilege.SELECT)));
+    assertPermissionDenied(
+        () ->
+            regular1Grants.update(
+                SecurableType.SCHEMA, SCHEMA, add(REGULAR_2, Privilege.USE_SCHEMA)));
+    assertPermissionDenied(
+        () ->
+            regular1Grants.update(
+                SecurableType.CATALOG, CATALOG, add(REGULAR_2, Privilege.USE_CATALOG)));
+    assertPermissionDenied(
+        () ->
+            regular1Grants.update(
+                SecurableType.TABLE, SCHEMA + ".t1", add(REGULAR_2, Privilege.SELECT)));
+    assertPermissionDenied(
+        () ->
+            regular1Grants.update(
+                SecurableType.SCHEMA, SCHEMA, remove(REGULAR_1, Privilege.SELECT)));
+    assertThat(listAllTables(regular2Tables, CATALOG, SCHEMA_NAME)).isEmpty();
+    assertThat(listAllTables(regular1Tables, CATALOG, SCHEMA_NAME)).hasSize(1);
+  }
+
+  @Test
+  @SneakyThrows
+  public void useAloneReadsNothingAndEveryAncestorUseIsRequired() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    ApiClient regular1Client = TestUtils.createApiClient(createTestUserServerConfig(REGULAR_1));
+    ApiClient regular2Client = TestUtils.createApiClient(createTestUserServerConfig(REGULAR_2));
+    ApiClient principal2Client = TestUtils.createApiClient(createTestUserServerConfig(PRINCIPAL_2));
+    TablesApi regular1Tables = new TablesApi(regular1Client);
+    TablesApi regular2Tables = new TablesApi(regular2Client);
+    SchemasApi regular2Schemas = new SchemasApi(regular2Client);
+    TablesApi principal2Tables = new TablesApi(principal2Client);
+    SchemasApi principal2Schemas = new SchemasApi(principal2Client);
+    TablesApi principal1Tables =
+        new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(PRINCIPAL_1)));
+    createExternalTable(principal1Tables, CATALOG, SCHEMA_NAME, "t1", testDirectoryRoot + "/t1");
+
+    // USE_* on their own open doors and read nothing: principal-2 can list the schema it may
+    // enter, but no table in it.
+    grantPermissions(PRINCIPAL_2, SecurableType.CATALOG, CATALOG, Privileges.USE_CATALOG);
+    grantPermissions(PRINCIPAL_2, SecurableType.SCHEMA, SCHEMA, Privileges.USE_SCHEMA);
+    assertThat(listSchemas(principal2Schemas, CATALOG)).containsExactly(SCHEMA_NAME);
+    assertThat(listAllTables(principal2Tables, CATALOG, SCHEMA_NAME)).isEmpty();
+    assertPermissionDenied(() -> principal2Tables.getTable(SCHEMA + ".t1", false, false));
+
+    // A schema-level SELECT without USE_CATALOG reaches nothing either; the entry right is
+    // required on every ancestor.
+    grantPermissions(
+        REGULAR_1, SecurableType.SCHEMA, SCHEMA, Privileges.USE_SCHEMA, Privileges.SELECT);
+    assertThat(listAllTables(regular1Tables, CATALOG, SCHEMA_NAME)).isEmpty();
+    assertPermissionDenied(() -> regular1Tables.getTable(SCHEMA + ".t1", false, false));
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, CATALOG, Privileges.USE_CATALOG);
+    assertThat(listAllTables(regular1Tables, CATALOG, SCHEMA_NAME)).hasSize(1);
+
+    // Same at the catalog: USE_CATALOG + SELECT without USE_SCHEMA sees no schema and no table;
+    // USE_SCHEMA on the catalog completes it.
+    grantPermissions(
+        REGULAR_2, SecurableType.CATALOG, CATALOG, Privileges.USE_CATALOG, Privileges.SELECT);
+    assertThat(listSchemas(regular2Schemas, CATALOG)).isEmpty();
+    assertThat(listAllTables(regular2Tables, CATALOG, SCHEMA_NAME)).isEmpty();
+    assertPermissionDenied(() -> regular2Tables.getTable(SCHEMA + ".t1", false, false));
+    grantPermissions(REGULAR_2, SecurableType.CATALOG, CATALOG, Privileges.USE_SCHEMA);
+    assertThat(listSchemas(regular2Schemas, CATALOG)).containsExactly(SCHEMA_NAME);
+    assertThat(listAllTables(regular2Tables, CATALOG, SCHEMA_NAME)).hasSize(1);
+  }
+
+  @Test
+  @SneakyThrows
+  public void temporaryCredentialsFollowTheInheritedSelectAndModify() {
+    createCommonTestUsers();
+    setupCommonCatalogAndSchema();
+    ApiClient regular1Client = TestUtils.createApiClient(createTestUserServerConfig(REGULAR_1));
+    TemporaryCredentialsApi regular1Credentials = new TemporaryCredentialsApi(regular1Client);
+    TablesApi principal1Tables =
+        new TablesApi(TestUtils.createApiClient(createTestUserServerConfig(PRINCIPAL_1)));
+
+    grantPermissions(REGULAR_1, SecurableType.CATALOG, CATALOG, Privileges.USE_CATALOG);
+    grantPermissions(
+        REGULAR_1, SecurableType.SCHEMA, SCHEMA, Privileges.USE_SCHEMA, Privileges.SELECT);
+    // Created after the grant: this is the path a query engine takes to read it.
+    TableInfo later =
+        createExternalTable(
+            principal1Tables, CATALOG, SCHEMA_NAME, "t_later", testDirectoryRoot + "/t_later");
+    GenerateTemporaryTableCredential read =
+        new GenerateTemporaryTableCredential()
+            .tableId(later.getTableId())
+            .operation(TableOperation.READ);
+    GenerateTemporaryTableCredential readWrite =
+        new GenerateTemporaryTableCredential()
+            .tableId(later.getTableId())
+            .operation(TableOperation.READ_WRITE);
+
+    assertThat(regular1Credentials.generateTemporaryTableCredentials(read)).isNotNull();
+    // SELECT alone does not write ...
+    assertPermissionDenied(() -> regular1Credentials.generateTemporaryTableCredentials(readWrite));
+    // ... MODIFY on the schema inherits the same way and completes it.
+    grantPermissions(REGULAR_1, SecurableType.SCHEMA, SCHEMA, Privileges.MODIFY);
+    assertThat(regular1Credentials.generateTemporaryTableCredentials(readWrite)).isNotNull();
+
+    // Taking SELECT away closes both, MODIFY on its own being no read right.
+    grantsApi.update(SecurableType.SCHEMA, SCHEMA, remove(REGULAR_1, Privilege.SELECT));
+    assertPermissionDenied(() -> regular1Credentials.generateTemporaryTableCredentials(read));
+    assertPermissionDenied(() -> regular1Credentials.generateTemporaryTableCredentials(readWrite));
+  }
+
+  /** What `principal` holds on the securable, as the admin sees it. */
+  @SneakyThrows
+  private List<Privilege> privilegesOf(String principal, SecurableType type, String fullName) {
+    return grantsApi.get(type, fullName, principal).getPrivilegeAssignments().stream()
+        .filter(assignment -> principal.equals(assignment.getPrincipal()))
+        .map(PrivilegeAssignment::getPrivileges)
+        .flatMap(List::stream)
+        .toList();
+  }
+
+  /** Appoints (or stands down) a metastore administrator through the control API, as admin. */
+  private AggregatedHttpResponse setMetastoreAdmin(String email, boolean grant) {
+    RequestHeaders headers =
+        RequestHeaders.builder()
+            .method(grant ? HttpMethod.PUT : HttpMethod.DELETE)
+            .path("/api/1.0/unity-control/metastore/admins/" + email)
+            .add(HttpHeaderNames.AUTHORIZATION, "Bearer " + adminConfig.getAuthToken())
+            .build();
+    return WebClient.builder(serverConfig.getServerUrl())
+        .build()
+        .execute(headers, HttpData.empty())
+        .aggregate()
+        .join();
   }
 
   // principal-1 holds CREATE CATALOG on the metastore (common setup) and owns what it creates,
