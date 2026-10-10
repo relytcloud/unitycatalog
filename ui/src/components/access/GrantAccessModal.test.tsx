@@ -1,4 +1,4 @@
-import { waitFor } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import { renderWithProviders } from '../../test-utils/render';
 import { programClient, requestsTo } from '../../test-utils/mockClient';
 import { clickModalOk, selectAntdOption } from '../../test-utils/antd';
@@ -94,6 +94,96 @@ describe('GrantAccessModal', () => {
     expect(requestsTo('patch', '/permissions/catalog/c')[0].data).toEqual({
       changes: [
         { principal: 'demo.reader@x.com', add: ['USE CATALOG'], remove: [] },
+      ],
+    });
+  });
+
+  it('schema read, as a metastore admin, writes USE_* and SELECT on the schema', async () => {
+    programClient([
+      { method: 'get', url: '/scim2/Users', response: USERS },
+      {
+        method: 'get',
+        url: '/auth/capabilities',
+        response: { metastore_admin: true },
+      },
+      {
+        method: 'patch',
+        url: '/permissions/',
+        response: { privilege_assignments: [] },
+      },
+    ]);
+    renderWithProviders(
+      <GrantAccessModal
+        open
+        closeModal={jest.fn()}
+        target={{ securableType: SecurableType.schema, fullName: 'c.s' }}
+      />,
+    );
+
+    // read is the first level on a schema and is enabled for an admin.
+    expect(
+      await screen.findByText(/covers every table beneath it/),
+    ).toBeInTheDocument();
+    await selectAntdOption(0, /Demo Reader/);
+    clickModalOk();
+
+    await waitFor(() =>
+      expect(requestsTo('patch', '/permissions/schema/c.s')).toHaveLength(1),
+    );
+    expect(requestsTo('patch', '/permissions/schema/c.s')[0].data).toEqual({
+      changes: [
+        {
+          principal: 'demo.reader@x.com',
+          add: ['USE SCHEMA', 'SELECT'],
+          remove: [],
+        },
+      ],
+    });
+    expect(requestsTo('patch', '/permissions/catalog/c')[0].data).toEqual({
+      changes: [
+        { principal: 'demo.reader@x.com', add: ['USE CATALOG'], remove: [] },
+      ],
+    });
+  });
+
+  it('schema read is disabled for a non-admin, who gets create by default', async () => {
+    programClient([
+      { method: 'get', url: '/scim2/Users', response: USERS },
+      {
+        method: 'get',
+        url: '/auth/capabilities',
+        response: { metastore_admin: false },
+      },
+      {
+        method: 'patch',
+        url: '/permissions/',
+        response: { privilege_assignments: [] },
+      },
+    ]);
+    renderWithProviders(
+      <GrantAccessModal
+        open
+        closeModal={jest.fn()}
+        target={{ securableType: SecurableType.schema, fullName: 'c.s' }}
+      />,
+    );
+
+    await screen.findByText('create');
+    await waitFor(() => expect(screen.getByLabelText('read')).toBeDisabled());
+    expect(screen.getByLabelText('create')).toBeChecked();
+    await selectAntdOption(0, /Demo Reader/);
+    clickModalOk();
+
+    await waitFor(() =>
+      expect(requestsTo('patch', '/permissions/schema/c.s')).toHaveLength(1),
+    );
+    expect(requestsTo('patch', '/permissions/schema/c.s')[0].data).toEqual({
+      changes: [
+        {
+          principal: 'demo.reader@x.com',
+          add: ['USE SCHEMA', 'CREATE TABLE'],
+          remove: [],
+        },
       ],
     });
   });

@@ -5,9 +5,11 @@ import {
   AccessLevel,
   AccessTarget,
   accessLevelsFor,
+  isAdminOnly,
   grantsFor,
   useUpdateAccess,
 } from '../../hooks/access';
+import { useIsMetastoreAdmin } from '../../hooks/authz';
 import { useScimUserOptions } from '../../hooks/users';
 
 interface GrantAccessFormValues {
@@ -41,7 +43,11 @@ export function GrantAccessModal({
   const userOptions = useScimUserOptions();
 
   const levels = accessLevelsFor(target.securableType);
-  const watchedLevel = Form.useWatch('level', form) ?? levels[0];
+  const { data: isAdmin = false } = useIsMetastoreAdmin();
+  const isDisabled = (level: AccessLevel) =>
+    isAdminOnly(target.securableType, level) && !isAdmin;
+  const defaultLevel = levels.find((level) => !isDisabled(level)) ?? levels[0];
+  const watchedLevel = Form.useWatch('level', form) ?? defaultLevel;
 
   // Reset the form each time the modal opens so a prior grant's values don't
   // linger (the useForm store outlives destroyOnClose, which only unmounts
@@ -49,6 +55,20 @@ export function GrantAccessModal({
   useEffect(() => {
     if (open) form.resetFields();
   }, [open, form]);
+  // The admin signal arrives after the first render; when it does, move off a
+  // level that turned out to be unavailable (or onto read once it is allowed).
+  useEffect(() => {
+    if (!open) return;
+    const current = form.getFieldValue('level') as AccessLevel | undefined;
+    if (
+      current === undefined ||
+      isDisabled(current) ||
+      current !== defaultLevel
+    ) {
+      form.setFieldValue('level', defaultLevel);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- defaultLevel already derives from isAdmin
+  }, [open, form, defaultLevel]);
 
   const handleSubmit = useCallback(() => {
     submitRef.current?.click();
@@ -75,7 +95,7 @@ export function GrantAccessModal({
       <Form<GrantAccessFormValues>
         form={form}
         layout="vertical"
-        initialValues={{ level: levels[0] }}
+        initialValues={{ level: defaultLevel }}
         onFinish={(values) => {
           mutation.mutate(
             {
@@ -122,11 +142,24 @@ export function GrantAccessModal({
           rules={[{ required: true, message: 'Access level is required' }]}
         >
           <Radio.Group
-            options={levels.map((level) => ({ value: level, label: level }))}
+            options={levels.map((level) => ({
+              value: level,
+              label: level,
+              disabled: isDisabled(level),
+            }))}
           />
         </Form.Item>
+        {watchedLevel && isAdminOnly(target.securableType, watchedLevel) && (
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+            Read on a {target.securableType} covers every table beneath it,
+            including tables created later. Only a metastore admin can grant or
+            revoke it
+            {isAdmin ? '.' : ', which is why it is unavailable to you.'}
+          </Typography.Paragraph>
+        )}
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          Privileges do not inherit in Unity Catalog, so this grant writes:
+          The USE grants on the ancestors are required to reach the object, so
+          this grant writes:
         </Typography.Paragraph>
         <ul style={{ marginTop: 0, paddingLeft: 20 }}>
           {plannedGrants.map((grant) => (
