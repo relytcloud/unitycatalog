@@ -322,6 +322,13 @@ built-in `admin`, and anyone appointed through `PUT /api/1.0/unity-control/metas
 `USE SCHEMA` with `SELECT` is refused as a whole, nothing half-applied. The UI's *Grant access*
 dialog offers `read` on a schema or catalog only to a metastore admin for the same reason.
 
+**Who sees the user directory.** Only a metastore owner may create, deactivate, delete or
+promote accounts (SCIM `POST`/`PUT`/`PATCH`/`DELETE` on `/scim2/Users`), so the UI shows the
+*Users* page to metastore admins only; anyone else gets no menu entry and is sent back to the
+catalogs if they open `/users` directly. The SCIM *listing* stays readable by any signed-in user:
+the *Grant access* dialog on a catalog, schema or table page picks the grantee from it, and an
+owner granting read on their own table needs that list.
+
 `USE CATALOG` and `USE SCHEMA` are deliberately **not** reserved to the metastore owner, on
 schemas and catalogs alike. They are entry rights only: with nothing but `USE_*` a user can list
 the names of the containers they may enter and reads no table, no column and no data. Reserving

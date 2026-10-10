@@ -274,6 +274,12 @@ PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
 应用一半。UI 的 *Grant access* 对话框在 schema / catalog 上只对 metastore admin 开放 `read` 档，
 原因相同。
 
+**谁能看到用户目录。** 建用户、停用、删除、任命管理员（SCIM `/scim2/Users` 的 `POST`/`PUT`/
+`PATCH`/`DELETE`）只有 metastore owner 能做，所以 UI 的 *Users* 页只对 metastore admin 显示；其他人
+没有菜单入口，直接打开 `/users` 会被送回 catalog 列表。SCIM 的*列表*接口仍对任何登录用户开放：
+catalog / schema / table 页的 *Grant access* 对话框要从里面选被授权人，owner 给自己表授 read 需要这份
+名单。
+
 `USE CATALOG` 与 `USE SCHEMA` 在 schema 和 catalog 上**有意不收**到 metastore owner 手里。它们只是
 通行权：一个用户只有 `USE_*` 时，能列出自己可以进入的容器名字，读不到任何表、任何列、任何数据。
 收掉它们会打断 owner 必须能自助完成的一件事——给同事授某一张表的 read，这需要祖先上的
