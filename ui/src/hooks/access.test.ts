@@ -1,6 +1,7 @@
 import {
   accessLevelsFor,
   grantsFor,
+  isAdminOnly,
   leafPrivilegeFor,
   revokesFor,
 } from './access';
@@ -118,16 +119,109 @@ describe('simplified access mapping', () => {
     ]);
   });
 
+  it('schema read grants USE_CATALOG + USE_SCHEMA + SELECT on the schema', () => {
+    expect(
+      grantsFor(
+        { securableType: SecurableType.schema, fullName: 'c.s' },
+        'read',
+      ),
+    ).toEqual([
+      {
+        securable_type: SecurableType.catalog,
+        full_name: 'c',
+        privilege: Privilege.USE_CATALOG,
+      },
+      {
+        securable_type: SecurableType.schema,
+        full_name: 'c.s',
+        privilege: Privilege.USE_SCHEMA,
+      },
+      {
+        securable_type: SecurableType.schema,
+        full_name: 'c.s',
+        privilege: Privilege.SELECT,
+      },
+    ]);
+  });
+
+  it('catalog read grants USE_CATALOG + USE_SCHEMA + SELECT, all on the catalog', () => {
+    // USE_SCHEMA on the catalog is what lets the read reach schemas created later.
+    expect(
+      grantsFor(
+        { securableType: SecurableType.catalog, fullName: 'c' },
+        'read',
+      ),
+    ).toEqual([
+      {
+        securable_type: SecurableType.catalog,
+        full_name: 'c',
+        privilege: Privilege.USE_CATALOG,
+      },
+      {
+        securable_type: SecurableType.catalog,
+        full_name: 'c',
+        privilege: Privilege.USE_SCHEMA,
+      },
+      {
+        securable_type: SecurableType.catalog,
+        full_name: 'c',
+        privilege: Privilege.SELECT,
+      },
+    ]);
+  });
+
+  it('revoking read on a schema or catalog removes only that SELECT', () => {
+    expect(
+      revokesFor(
+        { securableType: SecurableType.schema, fullName: 'c.s' },
+        'read',
+      ),
+    ).toEqual([
+      {
+        securable_type: SecurableType.schema,
+        full_name: 'c.s',
+        privilege: Privilege.SELECT,
+      },
+    ]);
+    expect(
+      revokesFor(
+        { securableType: SecurableType.catalog, fullName: 'c' },
+        'read',
+      ),
+    ).toEqual([
+      {
+        securable_type: SecurableType.catalog,
+        full_name: 'c',
+        privilege: Privilege.SELECT,
+      },
+    ]);
+  });
+
   it('levels and leaf privileges per securable type', () => {
     expect(accessLevelsFor(SecurableType.table)).toEqual(['read']);
-    expect(accessLevelsFor(SecurableType.schema)).toEqual(['create']);
-    expect(accessLevelsFor(SecurableType.catalog)).toEqual(['create']);
+    expect(accessLevelsFor(SecurableType.schema)).toEqual(['read', 'create']);
+    expect(accessLevelsFor(SecurableType.catalog)).toEqual(['read', 'create']);
     expect(accessLevelsFor(SecurableType.credential)).toEqual([]);
+    // Without a level, the first level of the securable is meant.
     expect(leafPrivilegeFor(SecurableType.table)).toBe(Privilege.SELECT);
-    expect(leafPrivilegeFor(SecurableType.schema)).toBe(Privilege.CREATE_TABLE);
-    expect(leafPrivilegeFor(SecurableType.catalog)).toBe(
+    expect(leafPrivilegeFor(SecurableType.schema)).toBe(Privilege.SELECT);
+    expect(leafPrivilegeFor(SecurableType.schema, 'create')).toBe(
+      Privilege.CREATE_TABLE,
+    );
+    expect(leafPrivilegeFor(SecurableType.catalog, 'read')).toBe(
+      Privilege.SELECT,
+    );
+    expect(leafPrivilegeFor(SecurableType.catalog, 'create')).toBe(
       Privilege.CREATE_SCHEMA,
     );
     expect(leafPrivilegeFor(SecurableType.external_location)).toBeUndefined();
+  });
+
+  it('read on a schema or catalog is reserved to the metastore admin', () => {
+    expect(isAdminOnly(SecurableType.schema, 'read')).toBe(true);
+    expect(isAdminOnly(SecurableType.catalog, 'read')).toBe(true);
+    expect(isAdminOnly(SecurableType.table, 'read')).toBe(false);
+    expect(isAdminOnly(SecurableType.schema, 'create')).toBe(false);
+    expect(isAdminOnly(SecurableType.catalog, 'create')).toBe(false);
   });
 });

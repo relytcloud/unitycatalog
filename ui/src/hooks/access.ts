@@ -7,27 +7,32 @@ import type { Route, SuccessResponseBody } from '../utils/openapi';
 import type { PrivilegeType } from './permissions';
 
 /**
- * Simplified access model for the permissions UI (issue #6).
+ * Simplified access model for the permissions UI (issue #6, extended by #19).
  *
- * UnityCatalog's server-side authorizer does NOT inherit privileges down the
- * hierarchy: to read one table a non-owner needs USE_CATALOG (on the catalog) +
- * USE_SCHEMA (on the schema) + SELECT (on the table); a SELECT/USE granted on
- * the catalog or schema does NOT cascade to the table. Exposing every raw
- * privilege in the UI is error-prone, so we collapse them into two levels —
- * `read` and `create` — and "auto-complete" the multiple securables each level
- * needs. This is a pure UI convenience; the backend authorizer is unchanged
- * (no inheritance is introduced).
+ * Two kinds of privilege are in play. USE_CATALOG / USE_SCHEMA are the right to
+ * enter a container and grant nothing on what is inside; the server requires
+ * them on every ancestor of whatever is being reached. SELECT (and MODIFY) is
+ * the right to read data, and the server resolves it through the hierarchy:
+ * SELECT granted on a schema covers every table beneath it, tables created
+ * later included, and SELECT on a catalog covers every schema's tables.
  *
- * Level → granted (securable, privilege) set:
- *   - table  · read   = catalog:USE_CATALOG + schema:USE_SCHEMA + table:SELECT
- *   - schema · create = catalog:USE_CATALOG + schema:USE_SCHEMA + schema:CREATE_TABLE
- *   - catalog· create = catalog:USE_CATALOG + catalog:CREATE_SCHEMA
+ * The UI collapses these into two levels and writes the USE_* each needs:
+ *   - table   · read   = catalog:USE_CATALOG + schema:USE_SCHEMA + table:SELECT
+ *   - schema  · read   = catalog:USE_CATALOG + schema:USE_SCHEMA + schema:SELECT
+ *   - catalog · read   = catalog:USE_CATALOG + catalog:USE_SCHEMA + catalog:SELECT
+ *     (USE_SCHEMA is checked per schema; granted on the catalog it inherits to
+ *     every schema, present and future, so the catalog-wide read reaches them)
+ *   - schema  · create = catalog:USE_CATALOG + schema:USE_SCHEMA + schema:CREATE_TABLE
+ *   - catalog · create = catalog:USE_CATALOG + catalog:CREATE_SCHEMA
+ *
+ * Because read on a schema or catalog reaches everything beneath it, the server
+ * lets only a metastore owner grant or revoke it (see isAdminOnly). Owners keep
+ * the table-level read and the create levels.
  *
  * Revoke intentionally removes ONLY the leaf privilege and keeps the USE_*
- * grants, because USE_CATALOG / USE_SCHEMA are shared by every read on sibling
- * tables in the same catalog/schema — cascading their removal would silently
- * break other tables' access. (Revoking read on a table only removes that
- * table's SELECT.)
+ * grants, because USE_CATALOG / USE_SCHEMA are shared by every grant on sibling
+ * objects in the same catalog/schema -- cascading their removal would silently
+ * break other objects' access.
  */
 export type AccessLevel = 'read' | 'create';
 
@@ -88,6 +93,41 @@ export function grantsFor(
     return list;
   }
 
+  if (target.securableType === SecurableType.schema && level === 'read') {
+    return [
+      useCatalog,
+      {
+        securable_type: SecurableType.schema,
+        full_name: target.fullName,
+        privilege: Privilege.USE_SCHEMA,
+      },
+      {
+        securable_type: SecurableType.schema,
+        full_name: target.fullName,
+        privilege: Privilege.SELECT,
+      },
+    ];
+  }
+
+  if (target.securableType === SecurableType.catalog && level === 'read') {
+    // USE_SCHEMA is checked per schema; granted on the catalog it inherits to
+    // every schema, present and future, which is what makes the catalog-wide
+    // SELECT reachable at all.
+    return [
+      useCatalog,
+      {
+        securable_type: SecurableType.catalog,
+        full_name: target.fullName,
+        privilege: Privilege.USE_SCHEMA,
+      },
+      {
+        securable_type: SecurableType.catalog,
+        full_name: target.fullName,
+        privilege: Privilege.SELECT,
+      },
+    ];
+  }
+
   if (target.securableType === SecurableType.schema && level === 'create') {
     return [
       useCatalog,
@@ -135,6 +175,19 @@ export function revokesFor(
       },
     ];
   }
+  if (
+    (target.securableType === SecurableType.schema ||
+      target.securableType === SecurableType.catalog) &&
+    level === 'read'
+  ) {
+    return [
+      {
+        securable_type: target.securableType,
+        full_name: target.fullName,
+        privilege: Privilege.SELECT,
+      },
+    ];
+  }
   if (target.securableType === SecurableType.schema && level === 'create') {
     return [
       {
@@ -157,24 +210,36 @@ export function revokesFor(
 }
 
 /**
- * The leaf privilege that *defines* the simplified level on a securable —
- * the one shown as a read/create tag and the only one a revoke removes:
- * table has SELECT → read, schema has CREATE_TABLE → create, catalog has
- * CREATE_SCHEMA → create.
+ * The leaf privilege that *defines* a simplified level on a securable -- the
+ * one shown as a tag and the only one a revoke removes. `read` is SELECT on
+ * any securable; `create` is CREATE_TABLE on a schema and CREATE_SCHEMA on a
+ * catalog. Without a level, the securable's first level is meant.
  */
 export function leafPrivilegeFor(
   securableType: SecurableType,
+  level?: AccessLevel,
 ): PrivilegeType | undefined {
-  switch (securableType) {
-    case SecurableType.table:
-      return Privilege.SELECT;
-    case SecurableType.schema:
-      return Privilege.CREATE_TABLE;
-    case SecurableType.catalog:
-      return Privilege.CREATE_SCHEMA;
-    default:
-      return undefined;
+  const resolved = level ?? accessLevelsFor(securableType)[0];
+  if (resolved === 'read') {
+    return [
+      SecurableType.table,
+      SecurableType.schema,
+      SecurableType.catalog,
+    ].includes(securableType)
+      ? Privilege.SELECT
+      : undefined;
   }
+  if (resolved === 'create') {
+    switch (securableType) {
+      case SecurableType.schema:
+        return Privilege.CREATE_TABLE;
+      case SecurableType.catalog:
+        return Privilege.CREATE_SCHEMA;
+      default:
+        return undefined;
+    }
+  }
+  return undefined;
 }
 
 /** The access levels offered for a given securable type in the simplified UI. */
@@ -183,12 +248,29 @@ export function accessLevelsFor(securableType: SecurableType): AccessLevel[] {
     case SecurableType.table:
       return ['read'];
     case SecurableType.schema:
-      return ['create'];
+      return ['read', 'create'];
     case SecurableType.catalog:
-      return ['create'];
+      return ['read', 'create'];
     default:
       return [];
   }
+}
+
+/**
+ * Whether only a metastore owner may grant or revoke this level here: read on
+ * a schema or catalog reaches every table beneath it, so the server reserves
+ * it (PermissionService). The UI only uses this to explain a disabled control;
+ * the server decides.
+ */
+export function isAdminOnly(
+  securableType: SecurableType,
+  level: AccessLevel,
+): boolean {
+  return (
+    level === 'read' &&
+    (securableType === SecurableType.schema ||
+      securableType === SecurableType.catalog)
+  );
 }
 
 /** Group (securable, privilege) items so each securable gets ONE PATCH. */

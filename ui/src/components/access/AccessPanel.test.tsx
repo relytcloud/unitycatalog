@@ -76,3 +76,76 @@ describe('AccessPanel (table)', () => {
     expect(requestsTo('patch', '/permissions/schema/')).toHaveLength(0);
   });
 });
+
+const SCHEMA_PERMISSIONS = {
+  privilege_assignments: [
+    // Reads every table beneath the schema, present and future.
+    { principal: 'svc@x.com', privileges: ['USE SCHEMA', 'SELECT'] },
+    // May create tables but reads none of them.
+    { principal: 'builder@x.com', privileges: ['USE SCHEMA', 'CREATE TABLE'] },
+    // USE alone is plumbing and shows up nowhere.
+    { principal: 'visitor@x.com', privileges: ['USE SCHEMA'] },
+  ],
+};
+
+describe('AccessPanel (schema)', () => {
+  it('lists read and create rows, from SELECT and CREATE_TABLE respectively', async () => {
+    programClient([
+      {
+        method: 'get',
+        url: '/permissions/schema/c.s',
+        response: SCHEMA_PERMISSIONS,
+      },
+      {
+        method: 'get',
+        url: '/auth/capabilities',
+        response: { metastore_admin: true },
+      },
+    ]);
+    renderWithProviders(
+      <AccessPanel securableType={SecurableType.schema} fullName="c.s" />,
+    );
+
+    expect(await screen.findByText('svc@x.com')).toBeInTheDocument();
+    expect(screen.getByText('builder@x.com')).toBeInTheDocument();
+    expect(screen.queryByText('visitor@x.com')).toBeNull();
+    expect(screen.getByText('read')).toBeInTheDocument();
+    expect(screen.getByText('create')).toBeInTheDocument();
+    // The panel says what read here means.
+    expect(
+      screen.getByText(/covers every table beneath this schema/),
+    ).toBeInTheDocument();
+  });
+
+  it('lets only a metastore admin revoke read on a schema', async () => {
+    programClient([
+      {
+        method: 'get',
+        url: '/permissions/schema/c.s',
+        response: {
+          privilege_assignments: [
+            { principal: 'svc@x.com', privileges: ['USE SCHEMA', 'SELECT'] },
+          ],
+        },
+      },
+      {
+        method: 'get',
+        url: '/auth/capabilities',
+        response: { metastore_admin: false },
+      },
+    ]);
+    renderWithProviders(
+      <AccessPanel
+        securableType={SecurableType.schema}
+        fullName="c.s"
+        owners={['me@x.com', 'me@x.com']}
+      />,
+    );
+
+    await screen.findByText('svc@x.com');
+    // The read tag renders, but without a close control for a non-admin.
+    expect(screen.getByText('read')).toBeInTheDocument();
+    // eslint-disable-next-line testing-library/no-node-access -- antd Tag close icon has no role
+    expect(document.querySelector('.ant-tag-close-icon')).toBeNull();
+  });
+});

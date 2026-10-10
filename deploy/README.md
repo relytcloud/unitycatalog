@@ -274,6 +274,69 @@ Notes:
   (the third argument binds the issuer to that key, so UC only uses it to verify tokens from that issuer).
 
 
+## Authorization model
+
+Two kinds of privilege are in play, and they are easy to confuse.
+
+| Privilege | What it is | Where it acts |
+|---|---|---|
+| `USE CATALOG`, `USE SCHEMA` | The right to enter a container. On its own it grants nothing on what is inside; the server requires it on every ancestor of whatever is being reached | Exactly the securable it is granted on |
+| `SELECT`, `MODIFY` | The right to read (write) data | The securable it is granted on **and everything beneath it** |
+
+`SELECT` and `MODIFY` inherit down the hierarchy: granted on a schema they cover every table in it,
+**including tables created later**; granted on a catalog they cover every schema's tables. The
+check on a table resolves through its parents, so nothing is copied and a revoke at the schema or
+catalog takes every table with it at once. The reach is the subtree and nothing else: a read on
+one schema says nothing about a sibling schema or another catalog. `OWNER` never inherits.
+`USE SCHEMA` is checked on each schema, but granted on a *catalog* it inherits to every schema in
+it the same way -- which is what a catalog-wide read needs (below).
+
+To read one table a principal therefore needs `USE CATALOG` + `USE SCHEMA` + `SELECT` on the
+table. To read every table in a schema, present and future -- what a service account usually
+wants -- grant the same two `USE_*` and `SELECT` on the schema instead:
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG"]}]}
+PATCH /api/2.1/unity-catalog/permissions/schema/<cat>.<sch>
+  {"changes":[{"principal":"<svc>","add":["USE SCHEMA","SELECT"]}]}
+```
+
+To read every table in every schema of a catalog, schemas created later included, put all three on
+the catalog. Without `USE SCHEMA` there the principal cannot enter any schema and the `SELECT`
+reaches nothing:
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG","USE SCHEMA","SELECT"]}]}
+```
+
+**Who may grant what.** There is no grant option: holding a privilege never includes passing it
+on, and a user who only *holds* `SELECT` on a schema can neither grant it to anyone else nor give
+it up. The right to grant comes from ownership alone. An owner (whoever created the securable, or
+was made its owner) grants on it and on what it contains: `USE_*`, `CREATE_*`, and
+`SELECT`/`MODIFY` on a table. Because `SELECT`/`MODIFY` on a **schema or catalog** reach
+everything beneath them, only a **metastore owner** may grant or revoke them there -- the
+built-in `admin`, and anyone appointed through `PUT /api/1.0/unity-control/metastore/admins/<email>`
+(the "super user"). A schema's owner who tries gets `PERMISSION_DENIED`, and a request that mixes
+`USE SCHEMA` with `SELECT` is refused as a whole, nothing half-applied. The UI's *Grant access*
+dialog offers `read` on a schema or catalog only to a metastore admin for the same reason.
+
+**Who sees the user directory.** Only a metastore owner may create, deactivate, delete or
+promote accounts (SCIM `POST`/`PUT`/`PATCH`/`DELETE` on `/scim2/Users`), so the UI shows the
+*Users* page to metastore admins only; anyone else gets no menu entry and is sent back to the
+catalogs if they open `/users` directly. The SCIM *listing* stays readable by any signed-in user:
+the *Grant access* dialog on a catalog, schema or table page picks the grantee from it, and an
+owner granting read on their own table needs that list.
+
+`USE CATALOG` and `USE SCHEMA` are deliberately **not** reserved to the metastore owner, on
+schemas and catalogs alike. They are entry rights only: with nothing but `USE_*` a user can list
+the names of the containers they may enter and reads no table, no column and no data. Reserving
+them would break the one thing owners must be able to do on their own -- give a colleague read on a
+single table, which needs `USE CATALOG` + `USE SCHEMA` on the ancestors -- and would buy nothing,
+because the data right is in `SELECT`/`MODIFY`, and those are reserved. The same reasoning covers
+`USE SCHEMA` granted on a catalog: it opens every schema's door, and still no table.
+
 ## UI sign-in
 
 The UI requires sign-in. Each way in has an address of its own; the application's address is not one

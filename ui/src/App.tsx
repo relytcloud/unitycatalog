@@ -40,6 +40,7 @@ import ExternalData from './pages/ExternalData';
 import CredentialDetails from './pages/CredentialDetails';
 import ExternalLocationDetails from './pages/ExternalLocationDetails';
 import UsersList from './pages/UsersList';
+import { useIsMetastoreAdmin } from './hooks/authz';
 import ResizableSplit from './components/layouts/ResizableSplit';
 
 // TODO:
@@ -144,7 +145,11 @@ export const appRoutes: RouteObject[] = [
       },
       {
         path: '/users',
-        element: <UsersList />,
+        element: (
+          <AdminRoute>
+            <UsersList />
+          </AdminRoute>
+        ),
       },
     ],
   },
@@ -184,12 +189,38 @@ function SignInRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * A page for metastore administrators only. The user directory is theirs:
+ * only they may create, deactivate or delete accounts, so there is nothing on
+ * it for anyone else, and a direct address lands on the catalogs instead.
+ * With authorization switched off nobody is restricted and the gate is open.
+ */
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { loginRequired } = useSignInState();
+  const { data: isAdmin, isPending } = useIsMetastoreAdmin();
+
+  if (!loginRequired) {
+    return <>{children}</>;
+  }
+  if (isPending) {
+    return <p>Loading...</p>;
+  }
+  if (!isAdmin) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
+
 function AppProvider() {
   const { logout, currentUser } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const { pathname } = location;
   const { loginRequired, pending } = useSignInState();
+  // The user directory is the administrators'; everyone else gets no entry to
+  // it (see AdminRoute for the address itself).
+  const { data: isAdmin = false } = useIsMetastoreAdmin();
+  const showUsers = !loginRequired || isAdmin;
 
   const selectedNavKey = pathname.startsWith('/external-data')
     ? 'external-data'
@@ -286,11 +317,15 @@ function AppProvider() {
                   label: 'External Data',
                   onClick: () => navigate('/external-data'),
                 },
-                {
-                  key: 'users',
-                  label: 'Users',
-                  onClick: () => navigate('/users'),
-                },
+                ...(showUsers
+                  ? [
+                      {
+                        key: 'users',
+                        label: 'Users',
+                        onClick: () => navigate('/users'),
+                      },
+                    ]
+                  : []),
               ]}
               style={{ flex: 1, minWidth: 0 }}
             />

@@ -78,3 +78,10 @@ Feature history of this fork, by PR merge date.
 
 - features: —
 - bugfix: `deploy-uc.sh` accepts a path in `UC_EXTERNAL_URL` (`https://api.example.com/unitycatalog`), which the #21 state-cookie fix depends on and which the script rejected outright, so the fix could not be reached through the repo's own deployment path. Trailing slash, empty segment, query, fragment and a missing scheme are still rejected. The sample file and both deployment guides now describe the behind-a-prefix case and the redirect URI to register.
+
+## 2026-10-10
+
+#25 (https://github.com/relytcloud/unitycatalog/pull/25)
+
+- features: Read access at the schema and catalog level. `SELECT` (and `MODIFY`) granted on a schema covers every table beneath it, tables created later included, and granted on a catalog -- together with `USE SCHEMA` on the catalog, which inherits the same way -- covers every schema's tables, schemas created later included; the reach is that subtree and nothing else. Because the reach is wide, granting or revoking `SELECT`/`MODIFY` on a schema or catalog is reserved to metastore administrators (the built-in `admin` and anyone appointed through `PUT /api/1.0/unity-control/metastore/admins/<email>`); owners keep `USE_*`, `CREATE_*` and table-level grants, and a request mixing `USE_*` with `SELECT` is refused as a whole. The UI offers `read` on a schema or catalog page to administrators, lists `read` and `create` rows separately, applies the same gate to the Users page's *Grant access* dialog, and shows the Users page to administrators only. Both deployment guides gain an *Authorization model* section: the two kinds of privilege, inheritance and its limits, the schema-wide and catalog-wide recipes, who may grant what and why `USE_*` is not reserved, and who sees the user directory.
+- bugfix: —

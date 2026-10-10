@@ -43,6 +43,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import com.linecorp.armeria.common.HttpResponse;
 import com.linecorp.armeria.server.annotation.ExceptionHandler;
 import com.linecorp.armeria.server.annotation.Get;
@@ -283,10 +284,49 @@ public class PermissionService {
     return updateAuthorization(CREDENTIAL, name, request);
   }
 
+  /**
+   * SELECT and MODIFY inherit down the hierarchy: granted on a catalog or schema they cover every
+   * table beneath it, including tables that do not exist yet (the authorizer resolves a table's
+   * privileges through its parents, see jcasbin_auth_model.conf's g2). That reach is the reason to
+   * grant them there -- and the reason only a metastore owner may: a schema's owner, which is
+   * whoever created it, would otherwise be able to open everything under it. USE_* and CREATE_*
+   * stay with the owners, because a table's owner granting read on that one table has to be able
+   * to add the USE_* its ancestors require.
+   */
+  private static final Set<Privilege> HIERARCHY_WIDE_PRIVILEGES =
+      Set.of(Privilege.SELECT, Privilege.MODIFY);
+
+  private void requireMetastoreOwnerForHierarchyWideGrants(
+      SecurableType securableType, List<PermissionsChange> changes) {
+    if (securableType != SecurableType.CATALOG && securableType != SecurableType.SCHEMA) {
+      return;
+    }
+    boolean touchesHierarchyWide =
+        changes.stream()
+            .anyMatch(
+                change ->
+                    Stream.concat(change.getAdd().stream(), change.getRemove().stream())
+                        .anyMatch(HIERARCHY_WIDE_PRIVILEGES::contains));
+    if (!touchesHierarchyWide) {
+      return;
+    }
+    UUID principalId = userRepository.findPrincipalId();
+    if (!authorizer.authorize(
+        principalId, metastoreRepository.getMetastoreId(), Privileges.OWNER)) {
+      throw new BaseException(
+          ErrorCode.PERMISSION_DENIED,
+          "SELECT and MODIFY on a "
+              + securableType.getValue()
+              + " apply to every table beneath it;"
+              + " only a metastore owner may grant or revoke them");
+    }
+  }
+
   private HttpResponse updateAuthorization(
       SecurableType securableType, String name, UpdatePermissions request) {
     UUID resourceId = getResourceId(securableType, name);
     List<PermissionsChange> changes = request.getChanges();
+    requireMetastoreOwnerForHierarchyWideGrants(securableType, changes);
     Set<UUID> principalIds = new HashSet<>();
     changes.forEach(
         change -> {

@@ -231,6 +231,61 @@ ConfigMap 只是"改这个文件"的一种投递方式。
 | 换 tag 升级后跑的仍是旧版本 | 整个 `UC_HOME` 被挂成了卷，遮蔽了镜像里的二进制；只挂 `etc/conf` 和 `etc/db` |
 
 
+## 授权模型
+
+有两类权限，很容易混。
+
+| 权限 | 是什么 | 作用在哪 |
+|---|---|---|
+| `USE CATALOG`、`USE SCHEMA` | 进入容器的"通行权"，本身不授予对里面任何对象的操作；服务端要求对被访问对象的每一层祖先都持有 | 只在被授予的那个对象上 |
+| `SELECT`、`MODIFY` | 读（写）数据的权限 | 被授予的对象**及其之下的一切** |
+
+`SELECT` 与 `MODIFY` 沿层级向下继承：授在 schema 上即覆盖其中全部表，**含之后新建的表**；授在
+catalog 上即覆盖所有 schema 的表。对表的判定会顺着父子关系向上找，没有任何复制动作，所以在 schema
+或 catalog 上撤销，其下所有表同时失效。覆盖范围就是那棵子树，再无其它：对某个 schema 的 read 不涉及
+兄弟 schema，也不涉及别的 catalog。`OWNER` 永不继承。`USE SCHEMA` 按 schema 逐个检查，但授在
+*catalog* 上时同样会继承到其中每个 schema——catalog 级整体可读正需要这一点（见下）。
+
+因此读一张表需要 `USE CATALOG` + `USE SCHEMA` + 表上的 `SELECT`；要读某个 schema 下的全部表（含
+未来的，服务账号通常要的就是这个），把 `SELECT` 授在 schema 上即可：
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG"]}]}
+PATCH /api/2.1/unity-catalog/permissions/schema/<cat>.<sch>
+  {"changes":[{"principal":"<svc>","add":["USE SCHEMA","SELECT"]}]}
+```
+
+要读某个 catalog 下所有 schema 的全部表（含之后新建的 schema），把三项都授在 catalog 上。少了
+`USE SCHEMA`，该账号进不了任何 schema，`SELECT` 就落不到任何表上：
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG","USE SCHEMA","SELECT"]}]}
+```
+
+**谁能授什么。** 没有 grant option：持有某个权限不等于可以转授，只是*持有* schema 上 `SELECT` 的
+用户既不能把它授给别人，也不能自己撤掉。能授，只来自 owner 身份。owner（创建者，或被设为 owner 的
+人）可以在自己的对象及其内容上授 `USE_*`、`CREATE_*`，以及表上的 `SELECT`/`MODIFY`。因为
+**schema 或 catalog** 上的 `SELECT`/`MODIFY` 会覆盖其下一切，这两层上的授予与撤销只有
+**metastore owner** 能做——内置的 `admin`，以及经
+`PUT /api/1.0/unity-control/metastore/admins/<email>` 任命的账号（"超级账号"）。schema 的 owner
+去做会得到 `PERMISSION_DENIED`；把 `USE SCHEMA` 和 `SELECT` 放在同一个请求里也会整单拒绝，不会
+应用一半。UI 的 *Grant access* 对话框在 schema / catalog 上只对 metastore admin 开放 `read` 档，
+原因相同。
+
+**谁能看到用户目录。** 建用户、停用、删除、任命管理员（SCIM `/scim2/Users` 的 `POST`/`PUT`/
+`PATCH`/`DELETE`）只有 metastore owner 能做，所以 UI 的 *Users* 页只对 metastore admin 显示；其他人
+没有菜单入口，直接打开 `/users` 会被送回 catalog 列表。SCIM 的*列表*接口仍对任何登录用户开放：
+catalog / schema / table 页的 *Grant access* 对话框要从里面选被授权人，owner 给自己表授 read 需要这份
+名单。
+
+`USE CATALOG` 与 `USE SCHEMA` 在 schema 和 catalog 上**有意不收**到 metastore owner 手里。它们只是
+通行权：一个用户只有 `USE_*` 时，能列出自己可以进入的容器名字，读不到任何表、任何列、任何数据。
+收掉它们会打断 owner 必须能自助完成的一件事——给同事授某一张表的 read，这需要祖先上的
+`USE CATALOG` + `USE SCHEMA`——却换不来任何安全收益，因为数据权限在 `SELECT`/`MODIFY` 上，而那两个
+已经收了。授在 catalog 上的 `USE SCHEMA` 同理：它打开每个 schema 的门，但仍然没有一张表。
+
 ## UI 登录
 
 UI 必须登录。**每个入口都有自己的地址，应用地址不是入口**：没有会话时应用地址会跳到 `<ui>/login`。

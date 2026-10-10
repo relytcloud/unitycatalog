@@ -6,8 +6,10 @@ import {
   AccessTarget,
   accessLevelsFor,
   grantsFor,
+  isAdminOnly,
   useUpdateAccess,
 } from '../../hooks/access';
+import { useCanManageGrants, useIsMetastoreAdmin } from '../../hooks/authz';
 import { useListCatalogs } from '../../hooks/catalog';
 import { useListSchemas } from '../../hooks/schemas';
 import { useListTables } from '../../hooks/tables';
@@ -36,6 +38,11 @@ interface GrantToUserFormValues {
  * traverse every catalog, schema and table (see UserAccessDetails). Granting
  * must not pay that cost: each level here is fetched only once its parent is
  * chosen, so opening this modal costs a single catalog listing.
+ *
+ * The same gates as GrantAccessModal apply: read on a schema or catalog is a
+ * metastore admin's alone, and every grant writes USE_CATALOG, so the caller
+ * must own the chosen catalog (or be an admin) for the Grant button to light
+ * up. The server re-authorizes each PATCH regardless.
  */
 export default function GrantToUserModal({
   open,
@@ -64,6 +71,16 @@ export default function GrantToUserModal({
     options: { enabled: open && !!catalog && !!schema },
   });
 
+  const { data: isAdmin = false } = useIsMetastoreAdmin();
+  // Every level writes USE_CATALOG on the chosen catalog, so that is the
+  // authority to check — its owner, or a metastore admin.
+  const catalogOwner = (catalogs.data?.catalogs ?? []).find(
+    (c) => c.name === catalog,
+  )?.owner;
+  const canGrant = useCanManageGrants(SecurableType.catalog, catalog, [
+    catalogOwner,
+  ]);
+
   useEffect(() => {
     if (open) {
       form.resetFields();
@@ -87,11 +104,32 @@ export default function GrantToUserModal({
     : null;
 
   const levels = target ? accessLevelsFor(target.securableType) : [];
+  const isDisabled = (level: AccessLevel) =>
+    !!target && isAdminOnly(target.securableType, level) && !isAdmin;
+  const defaultLevel = levels.find((level) => !isDisabled(level)) ?? levels[0];
   const watchedLevel = Form.useWatch('level', form);
   const effectiveLevel =
-    watchedLevel && levels.includes(watchedLevel) ? watchedLevel : levels[0];
+    watchedLevel && levels.includes(watchedLevel) && !isDisabled(watchedLevel)
+      ? watchedLevel
+      : defaultLevel;
+  // The admin signal arrives after the first render, and the target changes
+  // with every pick; keep the form off a level that is not available.
+  useEffect(() => {
+    if (!open || !target) return;
+    const current = form.getFieldValue('level') as AccessLevel | undefined;
+    if (
+      current === undefined ||
+      !levels.includes(current) ||
+      isDisabled(current)
+    ) {
+      form.setFieldValue('level', defaultLevel);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- defaultLevel already derives from target and isAdmin
+  }, [open, form, defaultLevel, target?.fullName]);
+
   const plannedGrants =
     target && effectiveLevel ? grantsFor(target, effectiveLevel) : [];
+  const grantBlocked = !!catalog && canGrant.ready && !canGrant.allowed;
 
   const handleSubmit = useCallback(() => {
     submitRef.current?.click();
@@ -105,7 +143,7 @@ export default function GrantToUserModal({
       okText="Grant"
       okButtonProps={{
         loading: mutation.isPending,
-        disabled: !target || !effectiveLevel,
+        disabled: !target || !effectiveLevel || grantBlocked,
       }}
       onOk={handleSubmit}
       destroyOnClose
@@ -155,6 +193,13 @@ export default function GrantToUserModal({
             }))}
           />
         </Form.Item>
+        {grantBlocked && (
+          <Typography.Paragraph type="warning" style={{ fontSize: 12 }}>
+            Granting on this catalog requires owning it (or being a metastore
+            admin), because every level also writes USE CATALOG on it; the
+            server enforces this.
+          </Typography.Paragraph>
+        )}
         <Form.Item label="Schema">
           <Select
             showSearch
@@ -199,15 +244,29 @@ export default function GrantToUserModal({
           />
         </Form.Item>
         {target && levels.length > 0 && (
-          <Form.Item label="Access level" name="level" initialValue={levels[0]}>
+          <Form.Item
+            label="Access level"
+            name="level"
+            initialValue={defaultLevel}
+          >
             <Radio.Group
               options={levels.map((level) => ({
                 label: level,
                 value: level,
+                disabled: isDisabled(level),
               }))}
             />
           </Form.Item>
         )}
+        {target &&
+          levels.some((level) => isAdminOnly(target.securableType, level)) && (
+            <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+              Read on a {target.securableType} covers every table beneath it,
+              including tables created later. Only a metastore admin can grant
+              or revoke it
+              {isAdmin ? '.' : ', which is why it is unavailable to you.'}
+            </Typography.Paragraph>
+          )}
         {plannedGrants.length > 0 && (
           <>
             <Typography.Text type="secondary">

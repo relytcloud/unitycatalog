@@ -15,10 +15,11 @@ import {
   AccessLevel,
   accessLevelsFor,
   ancestors,
+  isAdminOnly,
   leafPrivilegeFor,
   useUpdateAccess,
 } from '../../hooks/access';
-import { useCanManageGrants } from '../../hooks/authz';
+import { useCanManageGrants, useIsMetastoreAdmin } from '../../hooks/authz';
 import { useNotification } from '../../utils/NotificationContext';
 import { GrantAccessModal } from './GrantAccessModal';
 import { SecurableType } from '../../types/api/catalog.gen';
@@ -32,13 +33,22 @@ interface AccessPanelProps {
   owners?: (string | undefined)[];
 }
 
+interface AccessRow {
+  principal: string;
+  level: AccessLevel;
+}
+
 /**
- * Simplified access list for one catalog / schema / table. A principal is
- * shown here when they hold the securable's defining leaf privilege
- * (table:SELECT → read, schema:CREATE_TABLE → create, catalog:CREATE_SCHEMA →
- * create); the USE_* plumbing grants are intentionally hidden — the per-user
- * detail view on the Users page lists every raw privilege. Revoking removes
- * only the leaf privilege (see hooks/access.ts).
+ * Simplified access list for one catalog / schema / table: one row per
+ * (principal, level), where a principal holds a level when they hold its leaf
+ * privilege on this securable (read → SELECT, create → CREATE_TABLE /
+ * CREATE_SCHEMA). The USE_* plumbing grants are intentionally hidden — the
+ * per-user detail view on the Users page lists every raw privilege. Revoking
+ * removes only the leaf privilege (see hooks/access.ts).
+ *
+ * A read row on a schema or catalog means every table beneath it, tables
+ * created later included; the server lets only a metastore owner grant or
+ * revoke those, so their controls follow that signal rather than ownership.
  */
 export default function AccessPanel({
   securableType,
@@ -52,32 +62,39 @@ export default function AccessPanel({
   const mutation = useUpdateAccess();
   const { setNotification } = useNotification();
   const [grantOpen, setGrantOpen] = useState(false);
-  // Granting any simplified level always writes USE_CATALOG on the owning
-  // catalog (privileges don't inherit), so the grantor must be able to manage
-  // the CATALOG — its owner or a metastore admin. A schema/table owner who is
-  // NOT the catalog owner cannot complete the grant (the USE_CATALOG PATCH
-  // 403s), so gate the Grant button on catalog authority. The catalog owner is
-  // always the last entry of the resource→…→catalog `owners` chain.
+  // Granting any simplified level writes USE_CATALOG on the owning catalog,
+  // so the grantor must be able to manage the CATALOG — its owner or a
+  // metastore admin. A schema/table owner who is NOT the catalog owner cannot
+  // complete the grant (the USE_CATALOG PATCH 403s), so gate the Grant button
+  // on catalog authority. The catalog owner is always the last entry of the
+  // resource→…→catalog `owners` chain.
   const canGrant = useCanManageGrants(
     SecurableType.catalog,
     ancestors(fullName).catalog,
     [owners[owners.length - 1]],
   );
   // Revoking removes only the leaf privilege on THIS securable, which its own
-  // owner (or an ancestor / metastore admin) can do — keep the resource-chain
-  // gate for the per-row revoke control.
+  // owner (or an ancestor / metastore admin) can do — except read on a schema
+  // or catalog, which only a metastore admin may touch.
   const canRevoke = useCanManageGrants(securableType, fullName, owners);
+  const { data: isAdmin = false } = useIsMetastoreAdmin();
 
-  const level: AccessLevel | undefined = accessLevelsFor(securableType)[0];
-  const leafPrivilege = leafPrivilegeFor(securableType);
+  const levels = accessLevelsFor(securableType);
 
-  const rows = (data?.privilege_assignments ?? []).filter(
+  const rows: AccessRow[] = (data?.privilege_assignments ?? []).flatMap(
     (assignment) =>
-      leafPrivilege && (assignment.privileges ?? []).includes(leafPrivilege),
+      levels
+        .filter((level) => {
+          const leaf = leafPrivilegeFor(securableType, level);
+          return leaf && (assignment.privileges ?? []).includes(leaf);
+        })
+        .map((level) => ({ principal: assignment.principal ?? '', level })),
   );
 
-  const revoke = (principal: string) => {
-    if (!level) return;
+  const mayRevoke = (level: AccessLevel) =>
+    isAdminOnly(securableType, level) ? isAdmin : canRevoke.allowed;
+
+  const revoke = (principal: string, level: AccessLevel) => {
     mutation.mutate(
       {
         principal,
@@ -101,18 +118,24 @@ export default function AccessPanel({
 
   // The tag's close (X) handler stopsPropagation, so a wrapping Popconfirm
   // never sees the click; drive the confirm imperatively from onClose instead.
-  const confirmRevoke = (principal: string) => {
+  const confirmRevoke = (principal: string, level: AccessLevel) => {
+    const leaf = leafPrivilegeFor(securableType, level);
     Modal.confirm({
       title: `Revoke ${level} on ${fullName} from ${principal}?`,
-      content: `Only ${leafPrivilege} is removed; the USE grants on the catalog/schema stay because other objects may rely on them.`,
+      content: `Only ${leaf} is removed; the USE grants on the catalog/schema stay because other objects may rely on them.`,
       okText: 'Revoke',
       okButtonProps: { danger: true },
       cancelText: 'Cancel',
-      onOk: () => revoke(principal),
+      onOk: () => revoke(principal, level),
     });
   };
 
-  if (!level || !leafPrivilege) return null;
+  if (levels.length === 0) return null;
+
+  const levelList = levels.join(' / ');
+  const readReachesDown =
+    securableType === SecurableType.schema ||
+    securableType === SecurableType.catalog;
 
   return (
     <Flex vertical gap="small">
@@ -144,9 +167,12 @@ export default function AccessPanel({
         </Tooltip>
       </Flex>
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        Users with {level} access on this {securableType}. Only grants you are
-        allowed to see are listed; a non-owner sees just their own. Raw
-        privileges are listed in the per-user view on the Users page.
+        Users with {levelList} access on this {securableType}.
+        {readReachesDown &&
+          ` Read here covers every table beneath this ${securableType}, including tables created later; only a metastore admin can grant or revoke it.`}{' '}
+        Only grants you are allowed to see are listed; a non-owner sees just
+        their own. Raw privileges are listed in the per-user view on the Users
+        page.
       </Typography.Text>
       {isError && (
         <Alert
@@ -159,11 +185,11 @@ export default function AccessPanel({
       <Table
         size="small"
         loading={isLoading}
-        rowKey={(record) => `access-${record.principal}`}
+        rowKey={(record) => `access-${record.principal}-${record.level}`}
         dataSource={isError ? [] : rows}
         pagination={{ hideOnSinglePage: true, pageSize: 10 }}
         locale={{
-          emptyText: `No ${level} access granted on this ${securableType}`,
+          emptyText: `No ${levelList} access granted on this ${securableType}`,
         }}
         columns={[
           {
@@ -175,17 +201,19 @@ export default function AccessPanel({
           {
             title: 'Access',
             key: 'access',
-            render: (_, record) => (
+            render: (_, record: AccessRow) => (
               <Tag
-                color="blue"
-                closable={canRevoke.allowed}
+                color={record.level === 'read' ? 'blue' : 'green'}
+                closable={mayRevoke(record.level)}
                 onClose={(e) => {
                   e.preventDefault();
-                  confirmRevoke(record.principal ?? '');
+                  confirmRevoke(record.principal, record.level);
                 }}
-                style={{ cursor: canRevoke.allowed ? 'pointer' : 'default' }}
+                style={{
+                  cursor: mayRevoke(record.level) ? 'pointer' : 'default',
+                }}
               >
-                {level}
+                {record.level}
               </Tag>
             ),
           },
