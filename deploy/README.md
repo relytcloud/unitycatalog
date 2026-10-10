@@ -286,7 +286,10 @@ Two kinds of privilege are in play, and they are easy to confuse.
 `SELECT` and `MODIFY` inherit down the hierarchy: granted on a schema they cover every table in it,
 **including tables created later**; granted on a catalog they cover every schema's tables. The
 check on a table resolves through its parents, so nothing is copied and a revoke at the schema or
-catalog takes every table with it at once. `USE_*`, `CREATE_*` and `OWNER` do not inherit.
+catalog takes every table with it at once. The reach is the subtree and nothing else: a read on
+one schema says nothing about a sibling schema or another catalog. `OWNER` never inherits.
+`USE SCHEMA` is checked on each schema, but granted on a *catalog* it inherits to every schema in
+it the same way -- which is what a catalog-wide read needs (below).
 
 To read one table a principal therefore needs `USE CATALOG` + `USE SCHEMA` + `SELECT` on the
 table. To read every table in a schema, present and future -- what a service account usually
@@ -297,6 +300,15 @@ PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
   {"changes":[{"principal":"<svc>","add":["USE CATALOG"]}]}
 PATCH /api/2.1/unity-catalog/permissions/schema/<cat>.<sch>
   {"changes":[{"principal":"<svc>","add":["USE SCHEMA","SELECT"]}]}
+```
+
+To read every table in every schema of a catalog, schemas created later included, put all three on
+the catalog. Without `USE SCHEMA` there the principal cannot enter any schema and the `SELECT`
+reaches nothing:
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG","USE SCHEMA","SELECT"]}]}
 ```
 
 **Who may grant what.** An owner (whoever created the securable, or was made its owner) grants

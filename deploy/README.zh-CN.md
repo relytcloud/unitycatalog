@@ -242,7 +242,9 @@ ConfigMap 只是"改这个文件"的一种投递方式。
 
 `SELECT` 与 `MODIFY` 沿层级向下继承：授在 schema 上即覆盖其中全部表，**含之后新建的表**；授在
 catalog 上即覆盖所有 schema 的表。对表的判定会顺着父子关系向上找，没有任何复制动作，所以在 schema
-或 catalog 上撤销，其下所有表同时失效。`USE_*`、`CREATE_*`、`OWNER` 不继承。
+或 catalog 上撤销，其下所有表同时失效。覆盖范围就是那棵子树，再无其它：对某个 schema 的 read 不涉及
+兄弟 schema，也不涉及别的 catalog。`OWNER` 永不继承。`USE SCHEMA` 按 schema 逐个检查，但授在
+*catalog* 上时同样会继承到其中每个 schema——catalog 级整体可读正需要这一点（见下）。
 
 因此读一张表需要 `USE CATALOG` + `USE SCHEMA` + 表上的 `SELECT`；要读某个 schema 下的全部表（含
 未来的，服务账号通常要的就是这个），把 `SELECT` 授在 schema 上即可：
@@ -252,6 +254,14 @@ PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
   {"changes":[{"principal":"<svc>","add":["USE CATALOG"]}]}
 PATCH /api/2.1/unity-catalog/permissions/schema/<cat>.<sch>
   {"changes":[{"principal":"<svc>","add":["USE SCHEMA","SELECT"]}]}
+```
+
+要读某个 catalog 下所有 schema 的全部表（含之后新建的 schema），把三项都授在 catalog 上。少了
+`USE SCHEMA`，该账号进不了任何 schema，`SELECT` 就落不到任何表上：
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG","USE SCHEMA","SELECT"]}]}
 ```
 
 **谁能授什么。** owner（创建者，或被设为 owner 的人）可以在自己的对象及其内容上授 `USE_*`、
