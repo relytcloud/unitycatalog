@@ -231,6 +231,35 @@ ConfigMap 只是"改这个文件"的一种投递方式。
 | 换 tag 升级后跑的仍是旧版本 | 整个 `UC_HOME` 被挂成了卷，遮蔽了镜像里的二进制；只挂 `etc/conf` 和 `etc/db` |
 
 
+## 授权模型
+
+有两类权限，很容易混。
+
+| 权限 | 是什么 | 作用在哪 |
+|---|---|---|
+| `USE CATALOG`、`USE SCHEMA` | 进入容器的"通行权"，本身不授予对里面任何对象的操作；服务端要求对被访问对象的每一层祖先都持有 | 只在被授予的那个对象上 |
+| `SELECT`、`MODIFY` | 读（写）数据的权限 | 被授予的对象**及其之下的一切** |
+
+`SELECT` 与 `MODIFY` 沿层级向下继承：授在 schema 上即覆盖其中全部表，**含之后新建的表**；授在
+catalog 上即覆盖所有 schema 的表。对表的判定会顺着父子关系向上找，没有任何复制动作，所以在 schema
+或 catalog 上撤销，其下所有表同时失效。`USE_*`、`CREATE_*`、`OWNER` 不继承。
+
+因此读一张表需要 `USE CATALOG` + `USE SCHEMA` + 表上的 `SELECT`；要读某个 schema 下的全部表（含
+未来的，服务账号通常要的就是这个），把 `SELECT` 授在 schema 上即可：
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG"]}]}
+PATCH /api/2.1/unity-catalog/permissions/schema/<cat>.<sch>
+  {"changes":[{"principal":"<svc>","add":["USE SCHEMA","SELECT"]}]}
+```
+
+**谁能授什么。** owner（创建者，或被设为 owner 的人）可以在自己的对象及其内容上授 `USE_*`、
+`CREATE_*`，以及表上的 `SELECT`/`MODIFY`。因为 **schema 或 catalog** 上的 `SELECT`/`MODIFY` 会
+覆盖其下一切，这两层上的授予与撤销只有 **metastore owner** 能做——内置的 `admin`，以及被授予
+metastore `OWNER` 的账号；schema 的 owner 去做会得到 `PERMISSION_DENIED`。UI 的 *Grant access*
+对话框在 schema / catalog 上只对 metastore admin 开放 `read` 档，原因相同。
+
 ## UI 登录
 
 UI 必须登录。**每个入口都有自己的地址，应用地址不是入口**：没有会话时应用地址会跳到 `<ui>/login`。

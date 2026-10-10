@@ -274,6 +274,38 @@ Notes:
   (the third argument binds the issuer to that key, so UC only uses it to verify tokens from that issuer).
 
 
+## Authorization model
+
+Two kinds of privilege are in play, and they are easy to confuse.
+
+| Privilege | What it is | Where it acts |
+|---|---|---|
+| `USE CATALOG`, `USE SCHEMA` | The right to enter a container. On its own it grants nothing on what is inside; the server requires it on every ancestor of whatever is being reached | Exactly the securable it is granted on |
+| `SELECT`, `MODIFY` | The right to read (write) data | The securable it is granted on **and everything beneath it** |
+
+`SELECT` and `MODIFY` inherit down the hierarchy: granted on a schema they cover every table in it,
+**including tables created later**; granted on a catalog they cover every schema's tables. The
+check on a table resolves through its parents, so nothing is copied and a revoke at the schema or
+catalog takes every table with it at once. `USE_*`, `CREATE_*` and `OWNER` do not inherit.
+
+To read one table a principal therefore needs `USE CATALOG` + `USE SCHEMA` + `SELECT` on the
+table. To read every table in a schema, present and future -- what a service account usually
+wants -- grant the same two `USE_*` and `SELECT` on the schema instead:
+
+```bash
+PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
+  {"changes":[{"principal":"<svc>","add":["USE CATALOG"]}]}
+PATCH /api/2.1/unity-catalog/permissions/schema/<cat>.<sch>
+  {"changes":[{"principal":"<svc>","add":["USE SCHEMA","SELECT"]}]}
+```
+
+**Who may grant what.** An owner (whoever created the securable, or was made its owner) grants
+on it and on what it contains: `USE_*`, `CREATE_*`, and `SELECT`/`MODIFY` on a table. Because
+`SELECT`/`MODIFY` on a **schema or catalog** reach everything beneath them, only a **metastore
+owner** may grant or revoke them there -- the built-in `admin`, and anyone granted `OWNER` on the
+metastore. A schema's owner who tries gets `PERMISSION_DENIED`. The UI's *Grant access* dialog
+offers `read` on a schema or catalog only to a metastore admin for the same reason.
+
 ## UI sign-in
 
 The UI requires sign-in. Each way in has an address of its own; the application's address is not one
