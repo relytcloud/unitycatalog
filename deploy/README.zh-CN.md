@@ -264,11 +264,21 @@ PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
   {"changes":[{"principal":"<svc>","add":["USE CATALOG","USE SCHEMA","SELECT"]}]}
 ```
 
-**谁能授什么。** owner（创建者，或被设为 owner 的人）可以在自己的对象及其内容上授 `USE_*`、
-`CREATE_*`，以及表上的 `SELECT`/`MODIFY`。因为 **schema 或 catalog** 上的 `SELECT`/`MODIFY` 会
-覆盖其下一切，这两层上的授予与撤销只有 **metastore owner** 能做——内置的 `admin`，以及被授予
-metastore `OWNER` 的账号；schema 的 owner 去做会得到 `PERMISSION_DENIED`。UI 的 *Grant access*
-对话框在 schema / catalog 上只对 metastore admin 开放 `read` 档，原因相同。
+**谁能授什么。** 没有 grant option：持有某个权限不等于可以转授，只是*持有* schema 上 `SELECT` 的
+用户既不能把它授给别人，也不能自己撤掉。能授，只来自 owner 身份。owner（创建者，或被设为 owner 的
+人）可以在自己的对象及其内容上授 `USE_*`、`CREATE_*`，以及表上的 `SELECT`/`MODIFY`。因为
+**schema 或 catalog** 上的 `SELECT`/`MODIFY` 会覆盖其下一切，这两层上的授予与撤销只有
+**metastore owner** 能做——内置的 `admin`，以及经
+`PUT /api/1.0/unity-control/metastore/admins/<email>` 任命的账号（"超级账号"）。schema 的 owner
+去做会得到 `PERMISSION_DENIED`；把 `USE SCHEMA` 和 `SELECT` 放在同一个请求里也会整单拒绝，不会
+应用一半。UI 的 *Grant access* 对话框在 schema / catalog 上只对 metastore admin 开放 `read` 档，
+原因相同。
+
+`USE CATALOG` 与 `USE SCHEMA` 在 schema 和 catalog 上**有意不收**到 metastore owner 手里。它们只是
+通行权：一个用户只有 `USE_*` 时，能列出自己可以进入的容器名字，读不到任何表、任何列、任何数据。
+收掉它们会打断 owner 必须能自助完成的一件事——给同事授某一张表的 read，这需要祖先上的
+`USE CATALOG` + `USE SCHEMA`——却换不来任何安全收益，因为数据权限在 `SELECT`/`MODIFY` 上，而那两个
+已经收了。授在 catalog 上的 `USE SCHEMA` 同理：它打开每个 schema 的门，但仍然没有一张表。
 
 ## UI 登录
 

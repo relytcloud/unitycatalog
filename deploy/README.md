@@ -311,12 +311,24 @@ PATCH /api/2.1/unity-catalog/permissions/catalog/<cat>
   {"changes":[{"principal":"<svc>","add":["USE CATALOG","USE SCHEMA","SELECT"]}]}
 ```
 
-**Who may grant what.** An owner (whoever created the securable, or was made its owner) grants
-on it and on what it contains: `USE_*`, `CREATE_*`, and `SELECT`/`MODIFY` on a table. Because
-`SELECT`/`MODIFY` on a **schema or catalog** reach everything beneath them, only a **metastore
-owner** may grant or revoke them there -- the built-in `admin`, and anyone granted `OWNER` on the
-metastore. A schema's owner who tries gets `PERMISSION_DENIED`. The UI's *Grant access* dialog
-offers `read` on a schema or catalog only to a metastore admin for the same reason.
+**Who may grant what.** There is no grant option: holding a privilege never includes passing it
+on, and a user who only *holds* `SELECT` on a schema can neither grant it to anyone else nor give
+it up. The right to grant comes from ownership alone. An owner (whoever created the securable, or
+was made its owner) grants on it and on what it contains: `USE_*`, `CREATE_*`, and
+`SELECT`/`MODIFY` on a table. Because `SELECT`/`MODIFY` on a **schema or catalog** reach
+everything beneath them, only a **metastore owner** may grant or revoke them there -- the
+built-in `admin`, and anyone appointed through `PUT /api/1.0/unity-control/metastore/admins/<email>`
+(the "super user"). A schema's owner who tries gets `PERMISSION_DENIED`, and a request that mixes
+`USE SCHEMA` with `SELECT` is refused as a whole, nothing half-applied. The UI's *Grant access*
+dialog offers `read` on a schema or catalog only to a metastore admin for the same reason.
+
+`USE CATALOG` and `USE SCHEMA` are deliberately **not** reserved to the metastore owner, on
+schemas and catalogs alike. They are entry rights only: with nothing but `USE_*` a user can list
+the names of the containers they may enter and reads no table, no column and no data. Reserving
+them would break the one thing owners must be able to do on their own -- give a colleague read on a
+single table, which needs `USE CATALOG` + `USE SCHEMA` on the ancestors -- and would buy nothing,
+because the data right is in `SELECT`/`MODIFY`, and those are reserved. The same reasoning covers
+`USE SCHEMA` granted on a catalog: it opens every schema's door, and still no table.
 
 ## UI sign-in
 
