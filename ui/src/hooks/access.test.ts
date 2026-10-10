@@ -144,7 +144,8 @@ describe('simplified access mapping', () => {
     ]);
   });
 
-  it('catalog read grants USE_CATALOG + SELECT on the catalog', () => {
+  it('catalog read grants USE_CATALOG + USE_SCHEMA + SELECT, all on the catalog', () => {
+    // USE_SCHEMA on the catalog is what lets the read reach schemas created later.
     expect(
       grantsFor(
         { securableType: SecurableType.catalog, fullName: 'c' },
@@ -155,6 +156,11 @@ describe('simplified access mapping', () => {
         securable_type: SecurableType.catalog,
         full_name: 'c',
         privilege: Privilege.USE_CATALOG,
+      },
+      {
+        securable_type: SecurableType.catalog,
+        full_name: 'c',
+        privilege: Privilege.USE_SCHEMA,
       },
       {
         securable_type: SecurableType.catalog,

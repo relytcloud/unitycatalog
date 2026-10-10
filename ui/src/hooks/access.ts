@@ -19,7 +19,9 @@ import type { PrivilegeType } from './permissions';
  * The UI collapses these into two levels and writes the USE_* each needs:
  *   - table   · read   = catalog:USE_CATALOG + schema:USE_SCHEMA + table:SELECT
  *   - schema  · read   = catalog:USE_CATALOG + schema:USE_SCHEMA + schema:SELECT
- *   - catalog · read   = catalog:USE_CATALOG + catalog:SELECT
+ *   - catalog · read   = catalog:USE_CATALOG + catalog:USE_SCHEMA + catalog:SELECT
+ *     (USE_SCHEMA is checked per schema; granted on the catalog it inherits to
+ *     every schema, present and future, so the catalog-wide read reaches them)
  *   - schema  · create = catalog:USE_CATALOG + schema:USE_SCHEMA + schema:CREATE_TABLE
  *   - catalog · create = catalog:USE_CATALOG + catalog:CREATE_SCHEMA
  *
@@ -108,8 +110,16 @@ export function grantsFor(
   }
 
   if (target.securableType === SecurableType.catalog && level === 'read') {
+    // USE_SCHEMA is checked per schema; granted on the catalog it inherits to
+    // every schema, present and future, which is what makes the catalog-wide
+    // SELECT reachable at all.
     return [
       useCatalog,
+      {
+        securable_type: SecurableType.catalog,
+        full_name: target.fullName,
+        privilege: Privilege.USE_SCHEMA,
+      },
       {
         securable_type: SecurableType.catalog,
         full_name: target.fullName,
